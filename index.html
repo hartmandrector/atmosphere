@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Atmosphere - Temperature Filter</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1e1e1e;
+      color: #d4d4d4;
+      overflow: hidden;
+    }
+
+    #app {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+
+    header {
+      background: #252526;
+      padding: 12px 20px;
+      border-bottom: 1px solid #3e3e42;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+    }
+
+    h1 {
+      font-size: 18px;
+      font-weight: 500;
+      color: #cccccc;
+    }
+
+    .controls {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    button {
+      background: #0e639c;
+      color: white;
+      border: none;
+      padding: 6px 14px;
+      border-radius: 2px;
+      cursor: pointer;
+      font-size: 13px;
+      transition: background 0.2s;
+    }
+
+    button:hover {
+      background: #1177bb;
+    }
+
+    button:disabled {
+      background: #3e3e42;
+      cursor: not-allowed;
+    }
+
+    .info {
+      font-size: 12px;
+      color: #858585;
+    }
+
+    main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+      overflow: hidden;
+    }
+
+    #canvas {
+      width: 100%;
+      height: 100%;
+      cursor: crosshair;
+    }
+
+    .drop-zone {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      border: 3px dashed #3e3e42;
+      border-radius: 8px;
+      padding: 60px;
+      text-align: center;
+      pointer-events: none;
+      transition: all 0.3s;
+    }
+
+    .drop-zone.active {
+      border-color: #0e639c;
+      background: rgba(14, 99, 156, 0.1);
+    }
+
+    .drop-zone h2 {
+      font-size: 24px;
+      margin-bottom: 12px;
+      color: #858585;
+    }
+
+    .drop-zone p {
+      font-size: 14px;
+      color: #6e6e6e;
+    }
+
+    .legend {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      background: rgba(37, 37, 38, 0.9);
+      border: 1px solid #3e3e42;
+      border-radius: 4px;
+      padding: 12px;
+      font-size: 12px;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .legend-item:last-child {
+      margin-bottom: 0;
+    }
+
+    .legend-color {
+      width: 20px;
+      height: 3px;
+      border-radius: 2px;
+    }
+
+    .status {
+      position: absolute;
+      bottom: 10px;
+      left: 10px;
+      background: rgba(37, 37, 38, 0.9);
+      border: 1px solid #3e3e42;
+      border-radius: 4px;
+      padding: 8px 12px;
+      font-size: 11px;
+      color: #858585;
+    }
+
+    .filter-controls {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      background: rgba(37, 37, 38, 0.95);
+      border: 1px solid #3e3e42;
+      border-radius: 4px;
+      padding: 12px;
+      width: 280px;
+      max-height: calc(100vh - 120px);
+      overflow-y: auto;
+      font-size: 11px;
+    }
+
+    .filter-controls h3 {
+      font-size: 12px;
+      color: #cccccc;
+      margin-bottom: 8px;
+      font-weight: 500;
+    }
+
+    .param-group {
+      margin-bottom: 12px;
+    }
+
+    .param-group label {
+      display: block;
+      color: #858585;
+      margin-bottom: 4px;
+      font-size: 11px;
+    }
+
+    .param-group .param-value {
+      color: #4dabf7;
+      float: right;
+      font-family: monospace;
+    }
+
+    .param-group input[type="range"] {
+      width: 100%;
+      height: 4px;
+      background: #3e3e42;
+      outline: none;
+      border-radius: 2px;
+      -webkit-appearance: none;
+    }
+
+    .param-group input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 12px;
+      height: 12px;
+      background: #0e639c;
+      cursor: pointer;
+      border-radius: 50%;
+    }
+
+    .param-group input[type="range"]::-moz-range-thumb {
+      width: 12px;
+      height: 12px;
+      background: #0e639c;
+      cursor: pointer;
+      border-radius: 50%;
+      border: none;
+    }
+
+    .filter-controls button {
+      width: 100%;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>🌡️ Temperature Kalman Filter</h1>
+      <div class="controls">
+        <span class="info" id="data-info">No data loaded</span>
+        <button id="reset-btn" disabled>Reset View</button>
+        <button id="toggle-controls-btn">Filter Parameters</button>
+      </div>
+    </header>
+    <main id="drop-target">
+      <canvas id="canvas"></canvas>
+      <div class="drop-zone" id="drop-zone">
+        <h2>Drop Data Folder Here</h2>
+        <p>Drag and drop a folder containing TRACK.CSV and SENSOR.CSV</p>
+      </div>
+      <div class="legend">
+        <div class="legend-item">
+          <div class="legend-color" style="background: #ff6b6b;"></div>
+          <span>Device Temperature (°F)</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-color" style="background: #4dabf7;"></div>
+          <span>Filtered Outside Temp (°F)</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-color" style="background: #51cf66;"></div>
+          <span>ISA Standard Temp (°F)</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-color" style="background: #22c55e;"></div>
+          <span>ISA + Offset Temp (°F)</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-color" style="background: #ffd43b;"></div>
+          <span>Device Bias (K) - Right Axis</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-color" style="background: #a78bfa;"></div>
+          <span>GPS Altitude (m) - Far Right</span>
+        </div>
+      </div>
+      <div class="filter-controls" id="filter-controls" style="display: none;">
+        <h3>Kalman Filter Parameters</h3>
+        
+        <div class="param-group">
+          <label>
+            Pressure Measurement Variance (Pa²)
+            <span class="param-value" id="pressureVar-value">100</span>
+          </label>
+          <input type="range" id="pressureVar" min="1" max="1000" step="1" value="100">
+        </div>
+
+        <div class="param-group">
+          <label>
+            Device Temp Variance (K²)
+            <span class="param-value" id="deviceTempVar-value">4.0</span>
+          </label>
+          <input type="range" id="deviceTempVar" min="0.1" max="20" step="0.1" value="4.0">
+        </div>
+
+        <div class="param-group">
+          <label>
+            Temp Process Variance (K²/s²)
+            <span class="param-value" id="tempProcessVar-value">0.01</span>
+          </label>
+          <input type="range" id="tempProcessVar" min="0.001" max="1" step="0.001" value="0.01">
+        </div>
+
+        <div class="param-group">
+          <label>
+            Bias Process Variance (K²/s²)
+            <span class="param-value" id="biasProcessVar-value">0.001</span>
+          </label>
+          <input type="range" id="biasProcessVar" min="0.0001" max="0.1" step="0.0001" value="0.001">
+        </div>
+
+        <div class="param-group">
+          <label>
+            Rate Process Variance ((K/s)²/s²)
+            <span class="param-value" id="rateProcessVar-value">0.1</span>
+          </label>
+          <input type="range" id="rateProcessVar" min="0.001" max="1" step="0.001" value="0.1">
+        </div>
+
+        <div class="param-group">
+          <label>
+            Temperature Offset
+            <span class="param-value" id="tempOffset-value">10.0 K (18.0 °F)</span>
+          </label>
+          <input type="range" id="tempOffset" min="-20" max="50" step="0.5" value="10.0">
+        </div>
+
+        <button id="apply-params-btn">Apply & Reprocess</button>
+        <button id="reset-params-btn" style="background: #3e3e42;">Reset to Defaults</button>
+      </div>
+      <div class="status" id="status">
+        Ready
+      </div>
+    </main>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
