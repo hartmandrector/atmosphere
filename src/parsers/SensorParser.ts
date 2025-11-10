@@ -4,6 +4,7 @@ export interface SensorData {
   millis: number;           // Timestamp in milliseconds (GPS time)
   pressure?: number;        // Atmospheric pressure in Pa (from BARO)
   temperature?: number;     // Temperature in Celsius (from BARO, HUM, MAG, or IMU)
+  tempSource?: 'BARO' | 'HUM' | 'MAG' | 'IMU';  // Which sensor provided the temperature
   humidity?: number;        // Relative humidity (0-100) (from HUM)
   wx?: number;              // Angular velocity X (rad/s) (from IMU)
   wy?: number;              // Angular velocity Y (rad/s) (from IMU)
@@ -14,6 +15,10 @@ export interface SensorData {
   mx?: number;              // Magnetic field X (gauss) (from MAG)
   my?: number;              // Magnetic field Y (gauss) (from MAG)
   mz?: number;              // Magnetic field Z (gauss) (from MAG)
+  baroTemp?: number;        // Temperature from BARO sensor (Celsius)
+  humTemp?: number;         // Temperature from HUM sensor (Celsius)
+  magTemp?: number;         // Temperature from MAG sensor (Celsius)
+  imuTemp?: number;         // Temperature from IMU sensor (Celsius)
 }
 
 /**
@@ -97,7 +102,7 @@ export class SensorParser {
             this.data.push({
               millis: this.convertSensorTimeToGPS(parseFloat(parts[0])),
               pressure: parseFloat(parts[1]),
-              temperature: parseFloat(parts[2])
+              baroTemp: parseFloat(parts[2])
             });
           }
         } else if (trimmed.startsWith('$HUM,')) {
@@ -107,7 +112,7 @@ export class SensorParser {
             this.data.push({
               millis: this.convertSensorTimeToGPS(parseFloat(parts[0])),
               humidity: parseFloat(parts[1]),
-              temperature: parseFloat(parts[2])
+              humTemp: parseFloat(parts[2])
             });
           }
         } else if (trimmed.startsWith('$MAG,')) {
@@ -119,7 +124,7 @@ export class SensorParser {
               mx: parseFloat(parts[1]),
               my: parseFloat(parts[2]),
               mz: parseFloat(parts[3]),
-              temperature: parseFloat(parts[4])
+              magTemp: parseFloat(parts[4])
             });
           }
         } else if (trimmed.startsWith('$IMU,')) {
@@ -134,7 +139,7 @@ export class SensorParser {
               ax: parseFloat(parts[4]),
               ay: parseFloat(parts[5]),
               az: parseFloat(parts[6]),
-              temperature: parseFloat(parts[7])
+              imuTemp: parseFloat(parts[7])
             });
           }
         }

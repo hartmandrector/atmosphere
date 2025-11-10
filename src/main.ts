@@ -347,6 +347,9 @@ class App {
     tempOffset: 10.0
   };
   
+  // Temperature source selection
+  private tempSource: 'BARO' | 'HUM' | 'MAG' | 'IMU' = 'BARO';
+  
   // Store loaded data for reprocessing
   private trackText: string = '';
   private sensorText: string = '';
@@ -367,6 +370,7 @@ class App {
     
     this.setupDragDrop();
     this.setupFilterControls();
+    this.setupTempSourceSelector();
     this.resetBtn.addEventListener('click', () => this.plotter.resetView());
     
     // Load default data
@@ -434,6 +438,19 @@ class App {
       document.getElementById('rateProcessVar-value')!.textContent = '0.100';
       document.getElementById('tempOffset-value')!.textContent = '10.0 K (18.0 °F)';
       
+      if (this.trackText && this.sensorText) {
+        this.processData(this.trackText, this.sensorText);
+      }
+    });
+  }
+
+  private setupTempSourceSelector() {
+    const tempSourceSelect = document.getElementById('temp-source') as HTMLSelectElement;
+    
+    tempSourceSelect.addEventListener('change', () => {
+      this.tempSource = tempSourceSelect.value as 'BARO' | 'HUM' | 'MAG' | 'IMU';
+      
+      // Reprocess data with new temperature source
       if (this.trackText && this.sensorText) {
         this.processData(this.trackText, this.sensorText);
       }
@@ -576,6 +593,7 @@ class App {
     let sensorIndex = 0;
     let lastTime = 0;
     let currentAltitude = 0;
+    let currentPressure: number | undefined = undefined;  // Track most recent pressure
     
     while (trackIndex < trackData.length || sensorIndex < sensorData.length) {
       const nextTrack = trackIndex < trackData.length ? trackData[trackIndex] : null;
@@ -593,24 +611,43 @@ class App {
         currentTime = nextSensor.millis / 1000;
         dt = lastTime > 0 ? currentTime - lastTime : 0;
         
-        // Update filter
-        if (nextSensor.pressure && nextSensor.temperature !== undefined) {
-          if (currentAltitude !== 0 && dt > 0) {
-            filter.updatePressure(nextSensor.pressure, currentAltitude, dt);
-          }
-          
-          if (dt > 0) {
-            filter.updateDeviceTemperature(nextSensor.temperature + 273.15, dt);
-          }
-        } else if (nextSensor.temperature !== undefined && dt > 0) {
-          filter.updateDeviceTemperature(nextSensor.temperature + 273.15, dt);
+        // Update current pressure if this entry has it (BARO entries)
+        if (nextSensor.pressure !== undefined) {
+          currentPressure = nextSensor.pressure;
+        }
+        
+        // Get temperature from selected source
+        let temperature: number | undefined;
+        switch (this.tempSource) {
+          case 'BARO':
+            temperature = nextSensor.baroTemp;
+            break;
+          case 'HUM':
+            temperature = nextSensor.humTemp;
+            break;
+          case 'MAG':
+            temperature = nextSensor.magTemp;
+            break;
+          case 'IMU':
+            temperature = nextSensor.imuTemp;
+            break;
+        }
+        
+        // Update filter with pressure (use most recent pressure reading)
+        if (currentPressure !== undefined && currentAltitude !== 0 && dt > 0) {
+          filter.updatePressure(currentPressure, currentAltitude, dt);
+        }
+        
+        // Update filter with device temperature from selected source
+        if (temperature !== undefined && dt > 0) {
+          filter.updateDeviceTemperature(temperature + 273.15, dt);
         }
         
         // Add to plot data every 0.5 seconds
-        if (filter.isReady() && nextSensor.temperature !== undefined && Math.floor(currentTime * 2) % 1 === 0) {
+        if (filter.isReady() && temperature !== undefined && Math.floor(currentTime * 2) % 1 === 0) {
           plotData.push({
             time: currentTime,
-            deviceTemp: celsiusToFahrenheit(nextSensor.temperature),
+            deviceTemp: celsiusToFahrenheit(temperature),
             filteredTemp: celsiusToFahrenheit(filter.getOutsideTemperatureCelsius()),
             standardTemp: currentAltitude > 0 ? getStandardTemperature(currentAltitude) : undefined,
             standardTempOffset: currentAltitude > 0 ? getStandardTemperatureWithOffset(currentAltitude, this.filterParams.tempOffset) : undefined,

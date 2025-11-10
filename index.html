@@ -47,6 +47,25 @@
       flex-wrap: wrap;
     }
 
+    .controls label {
+      font-size: 13px;
+      color: #cccccc;
+    }
+
+    .controls select {
+      background: #252526;
+      color: #cccccc;
+      border: 1px solid #3e3e42;
+      padding: 5px 10px;
+      border-radius: 2px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    .controls select:hover {
+      border-color: #0e639c;
+    }
+
     button {
       background: #0e639c;
       color: white;
@@ -233,6 +252,13 @@
       <h1>🌡️ Temperature Kalman Filter</h1>
       <div class="controls">
         <span class="info" id="data-info">No data loaded</span>
+        <label for="temp-source">Temp Source:</label>
+        <select id="temp-source">
+          <option value="BARO">BARO</option>
+          <option value="HUM">HUM</option>
+          <option value="MAG">MAG</option>
+          <option value="IMU">IMU</option>
+        </select>
         <button id="reset-btn" disabled>Reset View</button>
         <button id="toggle-controls-btn">Filter Parameters</button>
       </div>
