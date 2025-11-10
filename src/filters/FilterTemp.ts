@@ -198,35 +198,35 @@ export class FilterTemp implements Filter {
 
   /**
    * Calculate outside air temperature from pressure and altitude using atmospheric model inversion.
-   * Modified barometric formula with temperature offset:
    * 
-   * The standard barometric formula is: P = P0 * ((T0 - L*h) / T0)^(g*M/(R*L))
+   * The standard barometric formula is: P = P0 * ((T - L*h) / T0)^(g*M/(R*L))
+   * where T is the sea-level temperature in the actual atmosphere.
    * 
-   * We invert this to get the "ISA temperature" from pressure and altitude, then apply the offset:
-   * T_ISA = T0 * (P/P0)^(R*L/(g*M)) - L*h
-   * T_actual = T_ISA + offset
+   * We solve for T (the actual sea level temperature):
+   * (P/P0)^(R*L/(g*M)) = (T - L*h) / T0
+   * T = T0 * (P/P0)^(R*L/(g*M)) + L*h
    * 
-   * The offset represents the deviation from ISA standard atmosphere at all altitudes.
+   * Then the temperature at altitude h is: T_at_h = T - L*h
+   * Combined: T_at_h = T0 * (P/P0)^(R*L/(g*M))
+   * 
+   * The tempOffset represents systematic deviation from ISA standard.
    */
   private calculateTemperatureFromPressure(pressure: number, altitude: number): number {
     // Avoid division by zero or invalid pressure
     if (pressure <= 0 || pressure > FilterTemp.PRESSURE_0 * 2) {
-      return FilterTemp.TEMP_0 + this.tempOffset;
+      return FilterTemp.TEMP_0 - FilterTemp.LAPSE_RATE * altitude + this.tempOffset;
     }
     
-    // Calculate temperature using standard ISA barometric formula inversion
+    // Calculate temperature at altitude using barometric formula inversion
     const pressureRatio = pressure / FilterTemp.PRESSURE_0;
     const exponent = (FilterTemp.GAS_CONSTANT * FilterTemp.LAPSE_RATE) / 
                      (FilterTemp.GRAVITY * FilterTemp.MM_AIR);
     
-    // Temperature from pressure (ISA model)
-    const tempFromPressure = FilterTemp.TEMP_0 * Math.pow(pressureRatio, exponent);
-    
-    // Apply altitude correction (temperature decreases with altitude: T = T_pressure - L*h)
-    const tempISA = tempFromPressure - FilterTemp.LAPSE_RATE * altitude;
+    // This gives the temperature at this altitude directly
+    const tempAtAltitude = FilterTemp.TEMP_0 * Math.pow(pressureRatio, exponent);
     
     // Add the temperature offset to account for non-standard atmosphere
-    const tempWithOffset = tempISA + this.tempOffset;
+    const tempWithOffset = tempAtAltitude + this.tempOffset;
 
     return tempWithOffset;
   }
