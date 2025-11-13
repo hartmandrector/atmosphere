@@ -172,6 +172,7 @@
       padding: 8px 12px;
       font-size: 11px;
       color: #858585;
+      z-index: 1;
     }
 
     .filter-controls {
@@ -219,6 +220,7 @@
       outline: none;
       border-radius: 2px;
       -webkit-appearance: none;
+      appearance: none;
     }
 
     .param-group input[type="range"]::-webkit-slider-thumb {
@@ -252,7 +254,13 @@
       <h1>🌡️ Temperature Kalman Filter</h1>
       <div class="controls">
         <span class="info" id="data-info">No data loaded</span>
-        <label for="temp-source">Temp Source:</label>
+        <label for="view-mode">Mode:</label>
+        <select id="view-mode">
+          <option value="temperature">Temperature</option>
+          <option value="tempphysics">TempPhysics</option>
+          <option value="orientation">Orientation</option>
+        </select>
+        <label for="temp-source" id="temp-source-label">Temp Source:</label>
         <select id="temp-source">
           <option value="BARO">BARO</option>
           <option value="HUM">HUM</option>
@@ -264,12 +272,43 @@
       </div>
     </header>
     <main id="drop-target">
-      <canvas id="canvas"></canvas>
       <div class="drop-zone" id="drop-zone">
         <h2>Drop Data Folder Here</h2>
         <p>Drag and drop a folder containing TRACK.CSV and SENSOR.CSV</p>
       </div>
-      <div class="legend">
+      
+      <!-- Temperature/TempPhysics Chart Area (default visible) -->
+      <canvas id="canvas"></canvas>
+      
+      <!-- Orientation display area (hidden by default) -->
+      <div id="orientation-display" style="display: none; flex: 1; flex-direction: column; gap: 0; position: absolute; top: 0; left: 0; right: 0; bottom: 0;">
+        <!-- Split view container -->
+        <div style="flex: 1; display: flex; flex-direction: row; gap: 0; min-height: 0;">
+          <!-- 3D Viewer -->
+          <div id="viewer-3d" style="flex: 1; position: relative; background: #1e1e1e;"></div>
+          
+          <!-- 2D Chart -->
+          <div id="chart-2d" style="flex: 1; position: relative; display: flex;">
+            <canvas id="canvas-orientation" style="width: 100%; height: 100%;"></canvas>
+          </div>
+        </div>
+        
+        <!-- Playback controls -->
+        <div id="playback-controls" style="display: flex; flex-direction: row; align-items: center; gap: 15px; padding: 12px 20px; background: #252526; border-top: 1px solid #3e3e42; position: relative; z-index: 10;">
+          <button id="play-btn" style="padding: 8px 16px;">▶ Play</button>
+          <button id="pause-btn" style="padding: 8px 16px;">⏸ Pause</button>
+          <button id="stop-btn" style="padding: 8px 16px;">⏹ Stop</button>
+          <div style="flex: 1; display: flex; align-items: center; gap: 10px;">
+            <label style="font-size: 13px; white-space: nowrap;">Speed:</label>
+            <input type="range" id="speed-slider" min="0.1" max="5" step="0.1" value="1" style="flex: 1; max-width: 200px;">
+            <span id="speed-value" style="font-size: 13px; min-width: 40px;">1.0x</span>
+          </div>
+          <span id="time-display" style="font-size: 13px; font-family: monospace; min-width: 120px; text-align: right;">0.0s / 0.0s</span>
+        </div>
+      </div>
+      
+      <!-- Temperature Mode Legend -->
+      <div class="legend" id="legend-temperature">
         <div class="legend-item">
           <div class="legend-color" style="background: #ff6b6b;"></div>
           <span>Device Temperature (°F)</span>
@@ -295,6 +334,59 @@
           <span>GPS Altitude (m) - Far Right</span>
         </div>
       </div>
+      
+      <!-- Physics Temperature Mode Legend -->
+      <div class="legend" id="legend-tempphysics" style="display: none;">
+        <div class="legend-item">
+          <div class="legend-color" style="background: #ff6b6b;"></div>
+          <span>Device Temperature (°F) - Left</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-color" style="background: #4dabf7;"></div>
+          <span>Filtered Outside Temp (°F) - Left</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-color" style="background: #51cf66;"></div>
+          <span>ISA Standard Temp (°F) - Left</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-color" style="background: #22c55e;"></div>
+          <span>ISA + Offset Temp (°F) - Left</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-color" style="background: #ffd43b;"></div>
+          <span>Cooling Coeff α (1/s) - Right 1</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-color" style="background: #ff8c42;"></div>
+          <span>Heating Rate β (K/s) - Right 2</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-color" style="background: #a78bfa;"></div>
+          <span>GPS Altitude (m) - Right 3</span>
+        </div>
+      </div>
+      
+      <!-- Orientation Mode Legend -->
+      <div class="legend" id="legend-orientation" style="display: none;">
+        <div class="legend-item">
+          <div class="legend-color" style="background: #ff6b6b;"></div>
+          <span>Roll (°) - Left</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-color" style="background: #4dabf7;"></div>
+          <span>Pitch (°) - Left</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-color" style="background: #51cf66;"></div>
+          <span>Yaw (°) - Left</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-color" style="background: #a78bfa;"></div>
+          <span>GPS Altitude (m) - Right</span>
+        </div>
+      </div>
+      
       <div class="filter-controls" id="filter-controls" style="display: none;">
         <h3>Kalman Filter Parameters</h3>
         
@@ -349,6 +441,71 @@
         <button id="apply-params-btn">Apply & Reprocess</button>
         <button id="reset-params-btn" style="background: #3e3e42;">Reset to Defaults</button>
       </div>
+      
+      <!-- Physics Filter Controls -->
+      <div class="filter-controls" id="physics-filter-controls" style="display: none;">
+        <h3>Physics-Based Filter Parameters</h3>
+        
+        <div class="param-group">
+          <label>
+            Pressure Measurement Variance (Pa²)
+            <span class="param-value" id="physics-pressureVar-value">100</span>
+          </label>
+          <input type="range" id="physics-pressureVar" min="1" max="1000" step="1" value="100">
+        </div>
+
+        <div class="param-group">
+          <label>
+            Device Temp Variance (K²)
+            <span class="param-value" id="physics-deviceTempVar-value">4.0</span>
+          </label>
+          <input type="range" id="physics-deviceTempVar" min="0.1" max="20" step="0.1" value="4.0">
+        </div>
+
+        <div class="param-group">
+          <label>
+            Temp Process Variance (K²/s²)
+            <span class="param-value" id="physics-tempProcessVar-value">0.01</span>
+          </label>
+          <input type="range" id="physics-tempProcessVar" min="0.001" max="1" step="0.001" value="0.01">
+        </div>
+
+        <div class="param-group">
+          <label>
+            Bias Process Variance (K²/s²)
+            <span class="param-value" id="physics-biasProcessVar-value">0.001</span>
+          </label>
+          <input type="range" id="physics-biasProcessVar" min="0.0001" max="0.1" step="0.0001" value="0.001">
+        </div>
+
+        <div class="param-group">
+          <label>
+            Cooling Process Variance ((1/s)²/s²)
+            <span class="param-value" id="physics-coolingProcessVar-value">0.01</span>
+          </label>
+          <input type="range" id="physics-coolingProcessVar" min="0.0001" max="0.1" step="0.0001" value="0.01">
+        </div>
+
+        <div class="param-group">
+          <label>
+            Rate Process Variance ((K/s)²/s²)
+            <span class="param-value" id="physics-rateProcessVar-value">0.1</span>
+          </label>
+          <input type="range" id="physics-rateProcessVar" min="0.001" max="1" step="0.001" value="0.1">
+        </div>
+
+        <div class="param-group">
+          <label>
+            Heating Rate β (K/s)
+            <span class="param-value" id="physics-heatingRate-value">0.500 K/s</span>
+          </label>
+          <input type="range" id="physics-heatingRate" min="0" max="2" step="0.01" value="0.5">
+        </div>
+
+        <button id="apply-physics-params-btn">Apply & Reprocess</button>
+        <button id="reset-physics-params-btn" style="background: #3e3e42;">Reset to Defaults</button>
+      </div>
+      
       <div class="status" id="status">
         Ready
       </div>
