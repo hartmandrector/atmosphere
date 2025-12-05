@@ -5,6 +5,8 @@ import { TrackParser, TrackPoint } from './parsers/TrackParser';
 import { SensorParser, SensorData } from './parsers/SensorParser';
 import { Renderer3D } from './Renderer3D';
 import { PlaybackController } from './PlaybackController';
+import { TemperatureEstimator, TemperatureEstimatorParams, TemperatureEstimateResult } from './utils/TemperatureEstimator';
+import { OffsetVisualizer, OffsetVisualizerParams, OffsetVisualizerState } from './OffsetVisualizer';
 
 export interface PlotPoint {
   time: number;
@@ -70,6 +72,7 @@ class Plotter {
   private isDragging = false;
   private lastX = 0;
   private lastY = 0;
+  private cursorTime: number | null = null;  // Current playback time for cursor
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -124,6 +127,16 @@ class Plotter {
     this.offsetX = 0;
     this.offsetY = 0;
     this.scale = 1;
+    this.render();
+  }
+  
+  setCursor(time: number) {
+    this.cursorTime = time;
+    this.render();
+  }
+  
+  clearCursor() {
+    this.cursorTime = null;
     this.render();
   }
 
@@ -287,6 +300,19 @@ class Plotter {
       this.plotLine(ctx, marginLeft, marginTop, plotWidth, plotHeight, 'pitch', '#4dabf7', 2 / this.scale, 'angle');
       this.plotLine(ctx, marginLeft, marginTop, plotWidth, plotHeight, 'yaw', '#51cf66', 2 / this.scale, 'angle');
       this.plotLine(ctx, marginLeft, marginTop, plotWidth, plotHeight, 'altitude', '#a78bfa', 1.5 / this.scale, 'altitude');
+    }
+    
+    // Draw playback cursor if active
+    if (this.cursorTime !== null) {
+      const timeRange = this.maxTime - this.minTime;
+      const cursorX = marginLeft + ((this.cursorTime - this.minTime) / timeRange) * plotWidth;
+      
+      ctx.strokeStyle = '#ffd43b';
+      ctx.lineWidth = 2 / this.scale;
+      ctx.beginPath();
+      ctx.moveTo(cursorX, marginTop);
+      ctx.lineTo(cursorX, marginTop + plotHeight);
+      ctx.stroke();
     }
     
     ctx.restore();
@@ -517,6 +543,14 @@ class App {
     heatingRate: 0.5  // β parameter (K/s)
   };
   
+  // Orientation filter parameters
+  private orientationFilterParams = {
+    gyroNoiseVar: 0.005,
+    gyroBiasNoiseVar: 0.0001,
+    accelNoiseVar: 1.0,
+    magNoiseVar: 1.0
+  };
+  
   // Temperature source selection
   private tempSource: 'BARO' | 'HUM' | 'MAG' | 'IMU' = 'BARO';
   
@@ -524,10 +558,18 @@ class App {
   private trackText: string = '';
   private sensorText: string = '';
   
+  // Temperature Estimator for GPS-based offset calculation
+  private temperatureEstimator: TemperatureEstimator = new TemperatureEstimator();
+  private currentGpsInfo: { latitude: number; longitude: number; millis: number; altitude: number } | null = null;
+  private lastEstimateResult: TemperatureEstimateResult | null = null;
+  
   // 3D view and playback for orientation mode
   private renderer3D: Renderer3D | null = null;
   private playbackController: PlaybackController | null = null;
   private orientationPlotter: Plotter | null = null;
+  
+  // Offset visualizer for temperature offset charts
+  private offsetVisualizer: OffsetVisualizer | null = null;
 
   constructor() {
     const canvas = document.getElementById('canvas') as HTMLCanvasElement;
@@ -546,8 +588,11 @@ class App {
     this.setupDragDrop();
     this.setupFilterControls();
     this.setupPhysicsFilterControls();
+    this.setupOrientationFilterControls();
     this.setupTempSourceSelector();
     this.setupViewModeSelector();
+    this.setupTemperatureEstimatorControls();
+    this.setupOffsetVisualizerControls();
     this.resetBtn.addEventListener('click', () => this.plotter.resetView());
     
     // Load default data
@@ -564,18 +609,65 @@ class App {
     const legendOrientation = document.getElementById('legend-orientation')!;
     const filterControls = document.getElementById('filter-controls')!;
     const physicsFilterControls = document.getElementById('physics-filter-controls')!;
+    const offsetFilterControls = document.getElementById('offset-filter-controls')!;
     
     viewModeSelect.addEventListener('change', () => {
-      const mode = viewModeSelect.value as 'temperature' | 'tempphysics' | 'orientation';
-      this.plotter.setViewMode(mode);
+      const mode = viewModeSelect.value as 'temperature' | 'tempphysics' | 'orientation' | 'offset';
       
       // Show/hide display areas
       const canvas = document.getElementById('canvas') as HTMLCanvasElement;
       const orientationDisplay = document.getElementById('orientation-display')!;
+      const offsetDisplay = document.getElementById('offset-display')!;
       
-      if (mode === 'orientation') {
-        canvas.style.display = 'none';
+      // Hide all displays first
+      canvas.style.display = 'none';
+      orientationDisplay.style.display = 'none';
+      offsetDisplay.style.display = 'none';
+      
+      // Hide all legends
+      legendTemperature.style.display = 'none';
+      legendTempPhysics.style.display = 'none';
+      legendOrientation.style.display = 'none';
+      
+      // Hide all control panels
+      filterControls.style.display = 'none';
+      physicsFilterControls.style.display = 'none';
+      document.getElementById('orientation-filter-controls')!.style.display = 'none';
+      offsetFilterControls.style.display = 'none';
+      
+      if (mode === 'offset') {
+        offsetDisplay.style.display = 'flex';
+        tempSourceLabel.style.display = 'none';
+        tempSourceSelect.style.display = 'none';
+        toggleControlsBtn.style.display = '';
+        
+        // Initialize offset visualizer if needed
+        if (!this.offsetVisualizer) {
+          const yearCanvas = document.getElementById('offset-year-canvas') as HTMLCanvasElement;
+          const monthCanvas = document.getElementById('offset-month-canvas') as HTMLCanvasElement;
+          const dayCanvas = document.getElementById('offset-day-canvas') as HTMLCanvasElement;
+          
+          this.offsetVisualizer = new OffsetVisualizer(yearCanvas, monthCanvas, dayCanvas);
+          
+          // If we have GPS data, initialize with it
+          if (this.currentGpsInfo) {
+            this.offsetVisualizer.setParams({
+              latitude: this.currentGpsInfo.latitude,
+              longitude: this.currentGpsInfo.longitude,
+              altitude: this.currentGpsInfo.altitude
+            });
+          }
+        }
+        
+        // Render the charts
+        this.offsetVisualizer.render();
+        
+      } else if (mode === 'orientation') {
         orientationDisplay.style.display = 'flex';
+        tempSourceLabel.style.display = 'none';
+        tempSourceSelect.style.display = 'none';
+        toggleControlsBtn.style.display = '';
+        legendOrientation.style.display = 'flex';
         
         // Initialize 3D renderer if needed
         if (!this.renderer3D) {
@@ -598,44 +690,35 @@ class App {
             this.renderer3D, playBtn, pauseBtn, stopBtn,
             speedSlider, speedValue, timeDisplay
           );
+          
+          // Pass the orientation plotter to the playback controller for cursor
+          this.playbackController.setPlotter(this.orientationPlotter);
         }
+        
+        // Reprocess data when switching modes
+        if (this.trackText && this.sensorText) {
+          this.processData(this.trackText, this.sensorText);
+        }
+        
       } else {
+        // Temperature or TempPhysics mode
         canvas.style.display = 'block';
-        orientationDisplay.style.display = 'none';
-      }
-      
-      // Reprocess data when switching modes
-      if (this.trackText && this.sensorText) {
-        this.processData(this.trackText, this.sensorText);
-      }
-      
-      // Show/hide appropriate controls
-      if (mode === 'temperature') {
         tempSourceLabel.style.display = '';
         tempSourceSelect.style.display = '';
         toggleControlsBtn.style.display = '';
-        legendTemperature.style.display = 'flex';
-        legendTempPhysics.style.display = 'none';
-        legendOrientation.style.display = 'none';
-        physicsFilterControls.style.display = 'none';
-      } else if (mode === 'tempphysics') {
-        tempSourceLabel.style.display = '';
-        tempSourceSelect.style.display = '';
-        toggleControlsBtn.style.display = '';
-        legendTemperature.style.display = 'none';
-        legendTempPhysics.style.display = 'flex';
-        legendOrientation.style.display = 'none';
-        filterControls.style.display = 'none';
-        physicsFilterControls.style.display = 'none';
-      } else if (mode === 'orientation') {
-        tempSourceLabel.style.display = 'none';
-        tempSourceSelect.style.display = 'none';
-        toggleControlsBtn.style.display = 'none';
-        filterControls.style.display = 'none';
-        physicsFilterControls.style.display = 'none';
-        legendTemperature.style.display = 'none';
-        legendTempPhysics.style.display = 'none';
-        legendOrientation.style.display = 'flex';
+        
+        if (mode === 'temperature') {
+          legendTemperature.style.display = 'flex';
+          this.plotter.setViewMode('temperature');
+        } else if (mode === 'tempphysics') {
+          legendTempPhysics.style.display = 'flex';
+          this.plotter.setViewMode('tempphysics');
+        }
+        
+        // Reprocess data when switching modes
+        if (this.trackText && this.sensorText) {
+          this.processData(this.trackText, this.sensorText);
+        }
       }
     });
   }
@@ -704,11 +787,460 @@ class App {
     });
   }
 
+  private setupTemperatureEstimatorControls() {
+    // Setup sliders for temperature estimator model parameters
+    const estimatorParams: { id: string; key: keyof TemperatureEstimatorParams }[] = [
+      { id: 'est-tEquator', key: 'T_EQUATOR' },
+      { id: 'est-aLat', key: 'A_LAT' },
+      { id: 'est-aYear', key: 'A_YEAR' },
+      { id: 'est-aDay', key: 'A_DAY' },
+      { id: 'est-h0', key: 'H0' },
+      { id: 'est-alpha', key: 'ALPHA' },
+      { id: 'est-beta', key: 'BETA' },
+      { id: 'est-lapseRate', key: 'LAPSE_RATE' }
+    ];
+
+    estimatorParams.forEach(({ id, key }) => {
+      const slider = document.getElementById(id) as HTMLInputElement;
+      const valueSpan = document.getElementById(`${id}-value`)!;
+      
+      slider.addEventListener('input', () => {
+        const value = parseFloat(slider.value);
+        const currentParams = this.temperatureEstimator.getParams();
+        currentParams[key] = value;
+        this.temperatureEstimator.setParams(currentParams);
+        valueSpan.textContent = value.toFixed(1);
+        
+        // Recalculate and update display if we have GPS data
+        this.updateTemperatureEstimate();
+      });
+    });
+
+    // Apply estimated offset button
+    const applyEstimatedBtn = document.getElementById('apply-estimated-offset-btn') as HTMLButtonElement;
+    applyEstimatedBtn.addEventListener('click', () => {
+      if (this.lastEstimateResult) {
+        // Apply the estimated offset to the filter's tempOffset parameter
+        const offsetK = this.lastEstimateResult.offsetK;
+        this.filterParams.tempOffset = offsetK;
+        
+        // Update the tempOffset slider and display
+        const tempOffsetSlider = document.getElementById('tempOffset') as HTMLInputElement;
+        const tempOffsetValue = document.getElementById('tempOffset-value')!;
+        tempOffsetSlider.value = offsetK.toFixed(1);
+        const degF = offsetK * 1.8;
+        tempOffsetValue.textContent = `${offsetK.toFixed(1)} K (${degF.toFixed(1)} °F)`;
+        
+        // Reprocess data with new offset
+        if (this.trackText && this.sensorText) {
+          this.processData(this.trackText, this.sensorText);
+        }
+      }
+    });
+
+    // Reset estimator parameters to defaults
+    const resetEstimatorBtn = document.getElementById('reset-estimator-params-btn') as HTMLButtonElement;
+    resetEstimatorBtn.addEventListener('click', () => {
+      const defaults: TemperatureEstimatorParams = {
+        T_EQUATOR: 32.0,
+        A_LAT: 23.0,
+        A_YEAR: 16.0,
+        A_DAY: 10.0,
+        H0: 3.0,
+        ALPHA: 1.2,
+        BETA: 1.0,
+        LAPSE_RATE: 6.5,
+        SUMMER_PEAK_DAY: null  // auto-calculate from latitude
+      };
+      
+      this.temperatureEstimator.setParams(defaults);
+      
+      // Update all sliders
+      (document.getElementById('est-tEquator') as HTMLInputElement).value = '32.0';
+      (document.getElementById('est-aLat') as HTMLInputElement).value = '23.0';
+      (document.getElementById('est-aYear') as HTMLInputElement).value = '16.0';
+      (document.getElementById('est-aDay') as HTMLInputElement).value = '10.0';
+      (document.getElementById('est-h0') as HTMLInputElement).value = '3.0';
+      (document.getElementById('est-alpha') as HTMLInputElement).value = '1.2';
+      (document.getElementById('est-beta') as HTMLInputElement).value = '1.0';
+      (document.getElementById('est-lapseRate') as HTMLInputElement).value = '6.5';
+      
+      document.getElementById('est-tEquator-value')!.textContent = '32.0';
+      document.getElementById('est-aLat-value')!.textContent = '23.0';
+      document.getElementById('est-aYear-value')!.textContent = '16.0';
+      document.getElementById('est-aDay-value')!.textContent = '10.0';
+      document.getElementById('est-h0-value')!.textContent = '3.0';
+      document.getElementById('est-alpha-value')!.textContent = '1.2';
+      document.getElementById('est-beta-value')!.textContent = '1.0';
+      document.getElementById('est-lapseRate-value')!.textContent = '6.5';
+      
+      // Recalculate with defaults
+      this.updateTemperatureEstimate();
+    });
+  }
+
+  private setupOffsetVisualizerControls() {
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    
+    // Helper to update display info
+    const updateOffsetDisplay = () => {
+      if (!this.offsetVisualizer) return;
+      
+      const params = this.offsetVisualizer.getParams();
+      const date = new Date(params.year, params.month - 1, params.day);
+      
+      document.getElementById('offset-location-info')!.textContent = 
+        `Lat: ${params.latitude.toFixed(2)}° Lon: ${params.longitude.toFixed(2)}°`;
+      document.getElementById('offset-date-info')!.textContent = 
+        `Date: ${monthNames[params.month - 1]} ${params.day}, ${params.year}`;
+      
+      // Calculate and display offset for noon on selected day
+      const estimator = new TemperatureEstimator(params.estimatorParams);
+      date.setUTCHours(12, 0, 0, 0);
+      const result = estimator.estimateTemperatureOffset(params.latitude, params.longitude, date.getTime());
+      document.getElementById('offset-calc-info')!.textContent = 
+        `Noon Offset: ${result.offsetK.toFixed(1)} K (${result.offsetF.toFixed(1)}°F)`;
+    };
+    
+    // Location sliders
+    const latSlider = document.getElementById('offset-lat') as HTMLInputElement;
+    const lonSlider = document.getElementById('offset-lon') as HTMLInputElement;
+    const altSlider = document.getElementById('offset-alt') as HTMLInputElement;
+    
+    latSlider.addEventListener('input', () => {
+      const value = parseFloat(latSlider.value);
+      document.getElementById('offset-lat-value')!.textContent = value.toFixed(2);
+      if (this.offsetVisualizer) {
+        this.offsetVisualizer.setParams({ latitude: value });
+        updateOffsetDisplay();
+      }
+    });
+    
+    lonSlider.addEventListener('input', () => {
+      const value = parseFloat(lonSlider.value);
+      document.getElementById('offset-lon-value')!.textContent = value.toFixed(2);
+      if (this.offsetVisualizer) {
+        this.offsetVisualizer.setParams({ longitude: value });
+        updateOffsetDisplay();
+      }
+    });
+    
+    altSlider.addEventListener('input', () => {
+      const value = parseFloat(altSlider.value);
+      document.getElementById('offset-alt-value')!.textContent = value.toFixed(0);
+      if (this.offsetVisualizer) {
+        this.offsetVisualizer.setParams({ altitude: value });
+        updateOffsetDisplay();
+      }
+    });
+    
+    // Date sliders
+    const dowSlider = document.getElementById('offset-dow') as HTMLInputElement;
+    const weekSlider = document.getElementById('offset-week') as HTMLInputElement;
+    const monthSlider = document.getElementById('offset-month') as HTMLInputElement;
+    const daySlider = document.getElementById('offset-day') as HTMLInputElement;
+    
+    // Day of week adjusts the day within the current week
+    dowSlider.addEventListener('input', () => {
+      const dow = parseInt(dowSlider.value);
+      document.getElementById('offset-dow-value')!.textContent = dow.toString();
+      
+      if (this.offsetVisualizer) {
+        const params = this.offsetVisualizer.getParams();
+        // Calculate the date for this day of week in current week
+        const currentDate = new Date(params.year, params.month - 1, params.day);
+        const currentDow = currentDate.getDay() || 7; // Convert Sunday=0 to 7
+        const diff = dow - currentDow;
+        currentDate.setDate(currentDate.getDate() + diff);
+        
+        this.offsetVisualizer.setParams({ 
+          month: currentDate.getMonth() + 1,
+          day: currentDate.getDate()
+        });
+        
+        // Update other sliders
+        monthSlider.value = (currentDate.getMonth() + 1).toString();
+        daySlider.value = currentDate.getDate().toString();
+        document.getElementById('offset-month-value')!.textContent = (currentDate.getMonth() + 1).toString();
+        document.getElementById('offset-day-value')!.textContent = currentDate.getDate().toString();
+        
+        updateOffsetDisplay();
+      }
+    });
+    
+    weekSlider.addEventListener('input', () => {
+      const week = parseInt(weekSlider.value);
+      document.getElementById('offset-week-value')!.textContent = week.toString();
+      
+      if (this.offsetVisualizer) {
+        const params = this.offsetVisualizer.getParams();
+        // Calculate date for this week (week 1 = first week of January)
+        const jan1 = new Date(params.year, 0, 1);
+        const daysToAdd = (week - 1) * 7;
+        const newDate = new Date(jan1.getTime() + daysToAdd * 24 * 60 * 60 * 1000);
+        
+        this.offsetVisualizer.setParams({
+          month: newDate.getMonth() + 1,
+          day: newDate.getDate()
+        });
+        
+        // Update other sliders
+        monthSlider.value = (newDate.getMonth() + 1).toString();
+        daySlider.value = newDate.getDate().toString();
+        document.getElementById('offset-month-value')!.textContent = (newDate.getMonth() + 1).toString();
+        document.getElementById('offset-day-value')!.textContent = newDate.getDate().toString();
+        
+        updateOffsetDisplay();
+      }
+    });
+    
+    monthSlider.addEventListener('input', () => {
+      const month = parseInt(monthSlider.value);
+      document.getElementById('offset-month-value')!.textContent = month.toString();
+      
+      if (this.offsetVisualizer) {
+        const params = this.offsetVisualizer.getParams();
+        // Clamp day to valid range for new month
+        const daysInMonth = new Date(params.year, month, 0).getDate();
+        const clampedDay = Math.min(params.day, daysInMonth);
+        
+        this.offsetVisualizer.setParams({ month, day: clampedDay });
+        
+        // Update day slider if clamped
+        if (clampedDay !== params.day) {
+          daySlider.value = clampedDay.toString();
+          document.getElementById('offset-day-value')!.textContent = clampedDay.toString();
+        }
+        
+        // Update week slider
+        const date = new Date(params.year, month - 1, clampedDay);
+        const jan1 = new Date(params.year, 0, 1);
+        const weekNum = Math.ceil(((date.getTime() - jan1.getTime()) / (24 * 60 * 60 * 1000) + jan1.getDay() + 1) / 7);
+        weekSlider.value = weekNum.toString();
+        document.getElementById('offset-week-value')!.textContent = weekNum.toString();
+        
+        updateOffsetDisplay();
+      }
+    });
+    
+    daySlider.addEventListener('input', () => {
+      const day = parseInt(daySlider.value);
+      document.getElementById('offset-day-value')!.textContent = day.toString();
+      
+      if (this.offsetVisualizer) {
+        const params = this.offsetVisualizer.getParams();
+        const daysInMonth = new Date(params.year, params.month, 0).getDate();
+        const clampedDay = Math.min(day, daysInMonth);
+        
+        this.offsetVisualizer.setParams({ day: clampedDay });
+        
+        // Update week and dow sliders
+        const date = new Date(params.year, params.month - 1, clampedDay);
+        const dow = date.getDay() || 7;
+        dowSlider.value = dow.toString();
+        document.getElementById('offset-dow-value')!.textContent = dow.toString();
+        
+        const jan1 = new Date(params.year, 0, 1);
+        const weekNum = Math.ceil(((date.getTime() - jan1.getTime()) / (24 * 60 * 60 * 1000) + jan1.getDay() + 1) / 7);
+        weekSlider.value = weekNum.toString();
+        document.getElementById('offset-week-value')!.textContent = weekNum.toString();
+        
+        updateOffsetDisplay();
+      }
+    });
+    
+    // Model parameter sliders
+    const modelParams: { id: string; key: keyof TemperatureEstimatorParams }[] = [
+      { id: 'offset-tEquator', key: 'T_EQUATOR' },
+      { id: 'offset-aLat', key: 'A_LAT' },
+      { id: 'offset-aYear', key: 'A_YEAR' },
+      { id: 'offset-aDay', key: 'A_DAY' },
+      { id: 'offset-h0', key: 'H0' },
+      { id: 'offset-alpha', key: 'ALPHA' },
+      { id: 'offset-beta', key: 'BETA' },
+      { id: 'offset-lapseRate', key: 'LAPSE_RATE' }
+    ];
+    
+    modelParams.forEach(({ id, key }) => {
+      const slider = document.getElementById(id) as HTMLInputElement;
+      const valueSpan = document.getElementById(`${id}-value`)!;
+      
+      slider.addEventListener('input', () => {
+        const value = parseFloat(slider.value);
+        valueSpan.textContent = value.toFixed(1);
+        
+        if (this.offsetVisualizer) {
+          const params = this.offsetVisualizer.getParams();
+          params.estimatorParams[key] = value;
+          this.offsetVisualizer.setParams({ estimatorParams: params.estimatorParams });
+          updateOffsetDisplay();
+        }
+      });
+    });
+    
+    // Use GPS data button
+    const useGpsBtn = document.getElementById('offset-use-gps-btn') as HTMLButtonElement;
+    useGpsBtn.addEventListener('click', () => {
+      if (this.currentGpsInfo && this.offsetVisualizer) {
+        const { latitude, longitude, altitude, millis } = this.currentGpsInfo;
+        const date = new Date(millis);
+        
+        this.offsetVisualizer.setParams({
+          latitude,
+          longitude,
+          altitude,
+          year: date.getUTCFullYear(),
+          month: date.getUTCMonth() + 1,
+          day: date.getUTCDate()
+        });
+        
+        // Update all sliders
+        latSlider.value = latitude.toString();
+        lonSlider.value = longitude.toString();
+        altSlider.value = altitude.toString();
+        monthSlider.value = (date.getUTCMonth() + 1).toString();
+        daySlider.value = date.getUTCDate().toString();
+        
+        document.getElementById('offset-lat-value')!.textContent = latitude.toFixed(2);
+        document.getElementById('offset-lon-value')!.textContent = longitude.toFixed(2);
+        document.getElementById('offset-alt-value')!.textContent = altitude.toFixed(0);
+        document.getElementById('offset-month-value')!.textContent = (date.getUTCMonth() + 1).toString();
+        document.getElementById('offset-day-value')!.textContent = date.getUTCDate().toString();
+        
+        // Update week and dow
+        const dow = date.getDay() || 7;
+        dowSlider.value = dow.toString();
+        document.getElementById('offset-dow-value')!.textContent = dow.toString();
+        
+        const jan1 = new Date(date.getUTCFullYear(), 0, 1);
+        const weekNum = Math.ceil(((date.getTime() - jan1.getTime()) / (24 * 60 * 60 * 1000) + jan1.getDay() + 1) / 7);
+        weekSlider.value = weekNum.toString();
+        document.getElementById('offset-week-value')!.textContent = weekNum.toString();
+        
+        updateOffsetDisplay();
+      }
+    });
+    
+    // Reset button
+    const resetBtn = document.getElementById('offset-reset-btn') as HTMLButtonElement;
+    resetBtn.addEventListener('click', () => {
+      if (this.offsetVisualizer) {
+        const currentYear = new Date().getFullYear();
+        const defaults = {
+          latitude: 41.22,
+          longitude: -111.97,
+          altitude: 1350,
+          year: currentYear,
+          month: 9,
+          day: 16,
+          estimatorParams: {
+            T_EQUATOR: 32.0,
+            A_LAT: 23.0,
+            A_YEAR: 16.0,
+            A_DAY: 10.0,
+            H0: 3.0,
+            ALPHA: 1.2,
+            BETA: 1.0,
+            LAPSE_RATE: 6.5,
+            SUMMER_PEAK_DAY: null
+          }
+        };
+        
+        this.offsetVisualizer.setParams(defaults);
+        
+        // Update all sliders
+        latSlider.value = '41.22';
+        lonSlider.value = '-111.97';
+        altSlider.value = '1350';
+        monthSlider.value = '9';
+        daySlider.value = '16';
+        dowSlider.value = '1';
+        weekSlider.value = '38';
+        
+        document.getElementById('offset-lat-value')!.textContent = '41.22';
+        document.getElementById('offset-lon-value')!.textContent = '-111.97';
+        document.getElementById('offset-alt-value')!.textContent = '1350';
+        document.getElementById('offset-month-value')!.textContent = '9';
+        document.getElementById('offset-day-value')!.textContent = '16';
+        document.getElementById('offset-dow-value')!.textContent = '1';
+        document.getElementById('offset-week-value')!.textContent = '38';
+        
+        // Reset model params
+        (document.getElementById('offset-tEquator') as HTMLInputElement).value = '32.0';
+        (document.getElementById('offset-aLat') as HTMLInputElement).value = '23.0';
+        (document.getElementById('offset-aYear') as HTMLInputElement).value = '16.0';
+        (document.getElementById('offset-aDay') as HTMLInputElement).value = '10.0';
+        (document.getElementById('offset-h0') as HTMLInputElement).value = '3.0';
+        (document.getElementById('offset-alpha') as HTMLInputElement).value = '1.2';
+        (document.getElementById('offset-beta') as HTMLInputElement).value = '1.0';
+        (document.getElementById('offset-lapseRate') as HTMLInputElement).value = '6.5';
+        
+        document.getElementById('offset-tEquator-value')!.textContent = '32.0';
+        document.getElementById('offset-aLat-value')!.textContent = '23.0';
+        document.getElementById('offset-aYear-value')!.textContent = '16.0';
+        document.getElementById('offset-aDay-value')!.textContent = '10.0';
+        document.getElementById('offset-h0-value')!.textContent = '3.0';
+        document.getElementById('offset-alpha-value')!.textContent = '1.2';
+        document.getElementById('offset-beta-value')!.textContent = '1.0';
+        document.getElementById('offset-lapseRate-value')!.textContent = '6.5';
+        
+        updateOffsetDisplay();
+      }
+    });
+  }
+
+  /**
+   * Update the temperature estimate display based on current GPS info and estimator params
+   */
+  private updateTemperatureEstimate(): void {
+    if (!this.currentGpsInfo) {
+      return;
+    }
+
+    const { latitude, longitude, millis, altitude } = this.currentGpsInfo;
+    const result = this.temperatureEstimator.estimateTemperatureOffset(latitude, longitude, millis, altitude);
+    this.lastEstimateResult = result;
+
+    // Update GPS info display
+    document.getElementById('gps-location')!.textContent = 
+      `Lat: ${latitude.toFixed(4)}° | Lon: ${longitude.toFixed(4)}° | Alt: ${altitude.toFixed(0)}m`;
+    document.getElementById('gps-datetime-utc')!.textContent = `UTC: ${result.utcDateTime}`;
+    document.getElementById('gps-datetime-local')!.textContent = `Local: ${result.localDateTime}`;
+    
+    // Update estimated offset display
+    document.getElementById('estimated-offset')!.textContent = 
+      `${result.offsetK.toFixed(1)} K (${result.offsetF.toFixed(1)} °F)`;
+    document.getElementById('estimated-sealevel')!.textContent = 
+      `Sea Level: ${result.seaLevelTempF.toFixed(1)}°F | At Alt: ${result.altitudeTempF.toFixed(1)}°F`;
+    document.getElementById('solar-info')!.textContent = 
+      `Solar Hour: ${result.solarHour.toFixed(2)} | Lag: ${result.lag.toFixed(1)} hrs | Day: ${result.dayOfYear}`;
+  }
+
+  /**
+   * Extract GPS info from track data and update the temperature estimator
+   */
+  private updateGpsInfoFromTrack(trackData: TrackPoint[]): void {
+    if (trackData.length > 0) {
+      // Use the first GPS point for location/time info
+      const firstPoint = trackData[0];
+      this.currentGpsInfo = {
+        latitude: firstPoint.latitude,
+        longitude: firstPoint.longitude,
+        millis: firstPoint.millis,
+        altitude: firstPoint.altitude
+      };
+      
+      this.updateTemperatureEstimate();
+    }
+  }
+
   private setupPhysicsFilterControls() {
     // Toggle controls visibility
     this.toggleControlsBtn.addEventListener('click', () => {
       const filterControls = document.getElementById('filter-controls')!;
       const physicsControls = document.getElementById('physics-filter-controls')!;
+      const orientationControls = document.getElementById('orientation-filter-controls')!;
+      const offsetControls = document.getElementById('offset-filter-controls')!;
       const viewMode = (document.getElementById('view-mode') as HTMLSelectElement).value;
       
       if (viewMode === 'temperature') {
@@ -717,6 +1249,12 @@ class App {
       } else if (viewMode === 'tempphysics') {
         const isVisible = physicsControls.style.display !== 'none';
         physicsControls.style.display = isVisible ? 'none' : 'block';
+      } else if (viewMode === 'orientation') {
+        const isVisible = orientationControls.style.display !== 'none';
+        orientationControls.style.display = isVisible ? 'none' : 'block';
+      } else if (viewMode === 'offset') {
+        const isVisible = offsetControls.style.display !== 'none';
+        offsetControls.style.display = isVisible ? 'none' : 'block';
       }
     });
 
@@ -777,6 +1315,70 @@ class App {
       document.getElementById('physics-coolingProcessVar-value')!.textContent = '0.0100';
       document.getElementById('physics-rateProcessVar-value')!.textContent = '0.100';
       document.getElementById('physics-heatingRate-value')!.textContent = '0.500 K/s';
+      
+      if (this.trackText && this.sensorText) {
+        this.processData(this.trackText, this.sensorText);
+      }
+    });
+  }
+
+  private setupOrientationFilterControls() {
+    // Setup sliders with logarithmic scale (slider range -3 to 1 maps to 0.001 to 10)
+    const params: (keyof typeof this.orientationFilterParams)[] = [
+      'gyroNoiseVar', 'gyroBiasNoiseVar', 'accelNoiseVar', 'magNoiseVar'
+    ];
+
+    params.forEach(param => {
+      const slider = document.getElementById(`orientation-${param}`) as HTMLInputElement;
+      const valueSpan = document.getElementById(`orientation-${param}-value`)!;
+      
+      slider.addEventListener('input', () => {
+        // Convert log scale slider value to actual value: value = 10^(slider)
+        const logValue = parseFloat(slider.value);
+        const value = Math.pow(10, logValue);
+        this.orientationFilterParams[param] = value;
+        
+        // Format based on magnitude
+        if (value < 0.001) {
+          valueSpan.textContent = value.toExponential(2);
+        } else if (value < 0.01) {
+          valueSpan.textContent = value.toFixed(5);
+        } else if (value < 1) {
+          valueSpan.textContent = value.toFixed(4);
+        } else {
+          valueSpan.textContent = value.toFixed(2);
+        }
+      });
+    });
+
+    // Apply parameters and reprocess
+    const applyBtn = document.getElementById('apply-orientation-params-btn') as HTMLButtonElement;
+    applyBtn.addEventListener('click', () => {
+      if (this.trackText && this.sensorText) {
+        this.processData(this.trackText, this.sensorText);
+      }
+    });
+
+    // Reset to defaults
+    const resetBtn = document.getElementById('reset-orientation-params-btn') as HTMLButtonElement;
+    resetBtn.addEventListener('click', () => {
+      this.orientationFilterParams = {
+        gyroNoiseVar: 0.005,
+        gyroBiasNoiseVar: 0.0001,
+        accelNoiseVar: 1.0,
+        magNoiseVar: 1.0
+      };
+      
+      // Set slider values as log10 of the actual values
+      (document.getElementById('orientation-gyroNoiseVar') as HTMLInputElement).value = String(Math.log10(0.005));
+      (document.getElementById('orientation-gyroBiasNoiseVar') as HTMLInputElement).value = String(Math.log10(0.0001));
+      (document.getElementById('orientation-accelNoiseVar') as HTMLInputElement).value = String(Math.log10(1.0));
+      (document.getElementById('orientation-magNoiseVar') as HTMLInputElement).value = String(Math.log10(1.0));
+      
+      document.getElementById('orientation-gyroNoiseVar-value')!.textContent = '0.0050';
+      document.getElementById('orientation-gyroBiasNoiseVar-value')!.textContent = '0.0001';
+      document.getElementById('orientation-accelNoiseVar-value')!.textContent = '1.00';
+      document.getElementById('orientation-magNoiseVar-value')!.textContent = '1.00';
       
       if (this.trackText && this.sensorText) {
         this.processData(this.trackText, this.sensorText);
@@ -916,6 +1518,9 @@ class App {
     const trackData = trackParser.getData();
     const sensorData = sensorParser.getData();
     
+    // Update GPS info and temperature estimate from track data
+    this.updateGpsInfoFromTrack(trackData);
+    
     this.status.textContent = `Filtering ${sensorData.length} sensor readings...`;
     
     // Determine which filter to use based on view mode
@@ -930,15 +1535,16 @@ class App {
     let orientationFilter: OrientationFilter | undefined;
     
     if (useOrientationFilter) {
-      // Initialize orientation filter with tuned noise parameters
-      // Very high measurement noise = maximum smoothing, heavily trusts gyro integration
+      // Initialize orientation filter with user-configured noise parameters
+      // IMU @ 13.33Hz (75ms), MAG @ 10Hz (100ms)
+      // Balance between drift prevention and stability during dynamic motion
       orientationFilter = new OrientationFilter(
-        0.001,  // gyroNoiseVar - gyroscope noise (rad/s)^2 - trust gyro heavily
-        0.00001,// gyroBiasNoiseVar - gyro bias random walk - bias very stable
-        10.0,   // accelNoiseVar - accelerometer noise (m/s^2)^2 - very high to smooth vibrations
-        5.0     // magNoiseVar - magnetometer noise (unit vector)^2 - high noise for smoothing
+        this.orientationFilterParams.gyroNoiseVar,
+        this.orientationFilterParams.gyroBiasNoiseVar,
+        this.orientationFilterParams.accelNoiseVar,
+        this.orientationFilterParams.magNoiseVar
       );
-      console.log('Created OrientationFilter with high smoothing parameters');
+      console.log('Created OrientationFilter with parameters:', this.orientationFilterParams);
     } else if (usePhysicsFilter) {
       filter = new FilterTempPhysics(
         this.physicsFilterParams.pressureVar,
@@ -1000,19 +1606,37 @@ class App {
         if (nextSensor.mx !== undefined && nextSensor.my !== undefined && nextSensor.mz !== undefined) {
           const magMag = Math.sqrt(nextSensor.mx**2 + nextSensor.my**2 + nextSensor.mz**2);
           if (magMag > 0) {
+            // Transform from FlySight body frame to NED frame, then normalize
+            // FlySight: +X=West, +Y=Up, +Z=North
+            // NED: +X=North, +Y=East, +Z=Down
+            const mag_ned_x = nextSensor.mz;   // FlySight mz (North) → NED mx (North)
+            const mag_ned_y = -nextSensor.mx;  // FlySight mx (West) → NED -my (negative East)
+            const mag_ned_z = -nextSensor.my;  // FlySight my (Up) → NED -mz (negative Down)
+            
+            // Normalize to unit vector (standard practice for direction-only measurements)
+            const magMag_ned = Math.sqrt(mag_ned_x**2 + mag_ned_y**2 + mag_ned_z**2);
             lastMag = { 
-              x: nextSensor.mx / magMag, 
-              y: nextSensor.my / magMag, 
-              z: nextSensor.mz / magMag 
+              x: mag_ned_x / magMag_ned, 
+              y: mag_ned_y / magMag_ned, 
+              z: mag_ned_z / magMag_ned 
             };
             
             // Debug: Log MAG entries with timing
             if (useOrientationFilter && plotData.length < 10) {
               console.log(`MAG entry at time ${currentTime.toFixed(3)}s:`, {
-                raw: {x: nextSensor.mx, y: nextSensor.my, z: nextSensor.mz},
+                raw_flysight: {x: nextSensor.mx, y: nextSensor.my, z: nextSensor.mz},
+                ned: {x: mag_ned_x, y: mag_ned_y, z: mag_ned_z},
                 normalized: lastMag,
-                magnitude: magMag
+                magnitude: magMag_ned.toFixed(4)
               });
+            }
+            
+            // Apply magnetometer update immediately when new MAG data arrives
+            if (useOrientationFilter && orientationFilter && orientationFilter.isInitialized()) {
+              if (plotData.length < 10) {
+                console.log(`  Applying MAG update at time ${currentTime.toFixed(3)}s`);
+              }
+              orientationFilter.updateMagnetometer(lastMag);
             }
           }
         }
@@ -1020,23 +1644,35 @@ class App {
         // Process orientation mode
         if (useOrientationFilter && orientationFilter) {
           // Initialize filter on first IMU reading if we have magnetometer data
+          // Skip first 2 seconds to allow device to stabilize in hand or on desk
           if (!orientationFilter.isInitialized() &&
+              currentTime >= 2.0 &&
               nextSensor.ax !== undefined && nextSensor.ay !== undefined && nextSensor.az !== undefined &&
+              nextSensor.wx !== undefined && nextSensor.wy !== undefined && nextSensor.wz !== undefined &&
               lastMag !== undefined) {
             // Convert units: acceleration from g to m/s²
-            // IMPORTANT: FlySight uses Z-up convention, but filter expects NED (Z-down)
-            // So we negate Z to convert from Z-up to Z-down
+            // Transform from FlySight body frame to NED frame:
+            // FlySight: +X=West, +Y=Up, +Z=North (when device faces north with top up)
+            // NED: +X=North, +Y=East, +Z=Down
+            // Transformation: [ax_ned, ay_ned, az_ned] = [az, -ax, -ay]
             const accel = { 
-              x: nextSensor.ax * 9.81, 
-              y: nextSensor.ay * 9.81, 
-              z: -nextSensor.az * 9.81  // NEGATE Z: convert Z-up to Z-down
+              x: nextSensor.az * 9.81,   // FlySight +Z (North) → NED +X (North)
+              y: -nextSensor.ax * 9.81,  // FlySight +X (West) → NED -Y (negative East)
+              z: -nextSensor.ay * 9.81   // FlySight +Y (Up) → NED -Z (negative Down)
+            };
+            // Gyro transformation (same as accel coordinate change)
+            const gyro = {
+              x: nextSensor.wz * Math.PI / 180,  // FlySight wz (about North) → NED wx
+              y: -nextSensor.wx * Math.PI / 180, // FlySight wx (about West) → NED -wy  
+              z: -nextSensor.wy * Math.PI / 180  // FlySight wy (about Up) → NED -wz
             };
             console.log(`Initializing filter at time ${currentTime.toFixed(3)}s`);
-            console.log('  Raw accel (g):', {x: nextSensor.ax, y: nextSensor.ay, z: nextSensor.az});
-            console.log('  Accel Z-down (m/s²):', accel);
+            console.log('  Raw accel FlySight frame (g):', {x: nextSensor.ax, y: nextSensor.ay, z: nextSensor.az});
+            console.log('  Accel NED frame (m/s²):', accel);
+            console.log('  Raw gyro (deg/s):', {x: nextSensor.wx, y: nextSensor.wy, z: nextSensor.wz});
             console.log('  Raw mag (gauss):', {x: lastMag.x, y: lastMag.y, z: lastMag.z});
             console.log('  Mag magnitude:', Math.sqrt(lastMag.x**2 + lastMag.y**2 + lastMag.z**2));
-            orientationFilter.initialize(accel, lastMag, currentTime);
+            orientationFilter.initialize(accel, lastMag, currentTime, gyro);
             const initEuler = orientationFilter.getEulerAngles();
             console.log('Filter initialized! Initial euler (rad):', initEuler, 'euler (deg):', {
               roll: initEuler.roll * 180 / Math.PI,
@@ -1050,11 +1686,14 @@ class App {
               nextSensor.wx !== undefined && nextSensor.wy !== undefined && nextSensor.wz !== undefined) {
             // NOTE: Raw sensor units from CSV are deg/s for gyro and g for accel
             // SensorParser does NOT convert them despite interface comments
-            // Convert gyroscope from deg/s to rad/s
+            // Convert gyroscope from deg/s to rad/s AND transform to NED frame
+            // FlySight: wx (about West), wy (about Up), wz (about North)
+            // NED: wx (about North), wy (about East), wz (about Down)
+            // Transformation: [wx_ned, wy_ned, wz_ned] = [wz, -wx, -wy]
             const gyro = { 
-              x: nextSensor.wx * Math.PI / 180, 
-              y: nextSensor.wy * Math.PI / 180, 
-              z: nextSensor.wz * Math.PI / 180 
+              x: nextSensor.wz * Math.PI / 180,   // FlySight wz (about North) → NED wx (about North)
+              y: -nextSensor.wx * Math.PI / 180,  // FlySight wx (about West) → NED -wy (about negative East)
+              z: -nextSensor.wy * Math.PI / 180   // FlySight wy (about Up) → NED -wz (about negative Down)
             };
             
             // Debug first few IMU readings with timing
@@ -1068,25 +1707,17 @@ class App {
             
             // Update with accelerometer if available (convert g to m/s²)
             if (nextSensor.ax !== undefined && nextSensor.ay !== undefined && nextSensor.az !== undefined) {
-              // IMPORTANT: Negate Z to convert from Z-up to Z-down (NED convention)
+              // Transform from FlySight body frame to NED frame
               const accel = { 
-                x: nextSensor.ax * 9.81, 
-                y: nextSensor.ay * 9.81, 
-                z: -nextSensor.az * 9.81  // NEGATE Z
+                x: nextSensor.az * 9.81,   // FlySight +Z (North) → NED +X (North)
+                y: -nextSensor.ax * 9.81,  // FlySight +X (West) → NED -Y (negative East)
+                z: -nextSensor.ay * 9.81   // FlySight +Y (Up) → NED -Z (negative Down)
               };
               orientationFilter.updateAccelerometer(accel);
             }
           }
           
-          // Update with magnetometer if we just got a new MAG reading
-          if (orientationFilter.isInitialized() &&
-              nextSensor.mx !== undefined && nextSensor.my !== undefined && nextSensor.mz !== undefined &&
-              lastMag !== undefined) {
-            if (plotData.length < 5) {
-              console.log(`  Applying MAG update at time ${currentTime.toFixed(3)}s`);
-            }
-            orientationFilter.updateMagnetometer(lastMag);
-          }
+         
           
           // Plot orientation data after processing each IMU entry (has gyro data)
           // Output every IMU sample (13.33Hz native sample rate)
@@ -1105,6 +1736,19 @@ class App {
             // Debug: Log first few points and periodically
             if (plotData.length < 5 || plotData.length % 100 === 0) {
               console.log(`Plot point ${plotData.length}:`, point);
+              const bias = orientationFilter.getGyroBias();
+              const bx = (bias.x * 180 / Math.PI).toFixed(2);
+              const by = (bias.y * 180 / Math.PI).toFixed(2);
+              const bz = (bias.z * 180 / Math.PI).toFixed(2);
+              console.log(`Bias(deg/s): x=${bx} y=${by} z=${bz}`);
+              
+              // Debug: Check if sensor values are stable
+              if (nextSensor.ax && nextSensor.ay && nextSensor.az) {
+                console.log(`Accel: ax=${nextSensor.ax.toFixed(3)} ay=${nextSensor.ay.toFixed(3)} az=${nextSensor.az.toFixed(3)}`);
+              }
+              if (nextSensor.wx !== undefined && nextSensor.wy !== undefined && nextSensor.wz !== undefined) {
+                console.log(`Gyro: wx=${nextSensor.wx.toFixed(3)} wy=${nextSensor.wy.toFixed(3)} wz=${nextSensor.wz.toFixed(3)}`);
+              }
             }
             
             plotData.push(point);

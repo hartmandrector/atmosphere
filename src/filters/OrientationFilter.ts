@@ -24,12 +24,15 @@ export class OrientationFilter {
   // Measurement noise for magnetometer (3x3)
   private R_mag: number[][];
   
-  // Gravity vector in inertial frame (NED convention: down is positive)
+  // Gravity vector in inertial frame (NED convention)  
+  // Standard roll/pitch formulas assume gravity points DOWN (+Z in NED)
+  // Even though accelerometer measures upward reaction force, we represent gravity as downward
+  // The formulas account for this by using the measured acceleration directly
   private readonly g: { x: number; y: number; z: number } = { x: 0, y: 0, z: 9.81 };
   
-  // Earth's magnetic field vector in inertial frame (normalized, pointing north)
-  // This should be set based on location; default is simplified horizontal north
-  private mag_earth: { x: number; y: number; z: number } = { x: 1, y: 0, z: 0 };
+  // Earth's magnetic field vector in inertial frame (pointing north)
+  // Magnitude doesn't matter since we normalize - only direction matters
+  private mag_earth: { x: number; y: number; z: number } = { x: 1.0, y: 0, z: 0 };
   
   private lastUpdateTime: number = 0;
   private initialized: boolean = false;
@@ -87,19 +90,45 @@ export class OrientationFilter {
 
   /**
    * Initialize filter with initial orientation from accelerometer and magnetometer
+   * Should only be called when device is stationary!
+   * 
+   * @param gyro - Optional gyroscope reading to verify device is stationary
    */
   initialize(accel: { x: number; y: number; z: number }, 
              mag: { x: number; y: number; z: number },
-             timestamp: number): void {
-    // Normalize accelerometer
+             timestamp: number,
+             gyro?: { x: number; y: number; z: number }): void {
+    // Check if device is approximately stationary (accel magnitude ≈ gravity)
     const a_norm = Math.sqrt(accel.x * accel.x + accel.y * accel.y + accel.z * accel.z);
+    const gravity_mag = 9.81;
+    if (Math.abs(a_norm - gravity_mag) > 1.0) {
+      console.warn(`Cannot initialize: device is moving! Accel magnitude: ${a_norm.toFixed(2)} m/s² (expected ~9.81)`);
+      return;
+    }
+    
+    // Check gyroscope if provided (should be near zero when stationary)
+    if (gyro) {
+      const gyro_norm = Math.sqrt(gyro.x**2 + gyro.y**2 + gyro.z**2);
+      const gyro_deg = gyro_norm * 180 / Math.PI;
+      // Use relaxed threshold (20 deg/s) to allow initialization in less-than-perfect conditions
+      // During skydiving, finding perfectly still moments is rare
+      if (gyro_deg > 20.0) {
+        console.warn(`Cannot initialize: device is rotating! Gyro magnitude: ${gyro_deg.toFixed(2)} deg/s (should be <20)`);
+        return;
+      }
+    }
+    
     if (a_norm < 0.1) return;
     
-    const ax = accel.x / a_norm;
-    const ay = accel.y / a_norm;
-    const az = accel.z / a_norm;
+    // Accelerometer measures reaction force (opposite of gravity)
+    // Negate to get gravity direction for standard roll/pitch formulas
+    const ax = -accel.x / a_norm;
+    const ay = -accel.y / a_norm;
+    const az = -accel.z / a_norm;
     
     // Calculate roll and pitch from accelerometer
+    // Standard formulas: roll = atan2(ay, az), pitch = atan2(-ax, sqrt(ay²+az²))
+    // where (ax, ay, az) represents gravity direction (down)
     const roll = Math.atan2(ay, az);
     const pitch = Math.atan2(-ax, Math.sqrt(ay * ay + az * az));
     
@@ -128,6 +157,17 @@ export class OrientationFilter {
       this.state[1] = q.x;
       this.state[2] = q.y;
       this.state[3] = q.z;
+      
+      // Set mag_earth by rotating measured mag from body to NED frame
+      // This captures the actual local magnetic field direction (including dip angle)
+      this.mag_earth = q.rotateVector({ x: mx, y: my, z: mz });
+      console.log('Initialized mag_earth (NED frame):', this.mag_earth);
+    }
+    
+    // Reset covariance to reflect confidence in initial orientation from accel/mag
+    // Quaternion uncertainty should be small since we just computed it
+    for (let i = 0; i < 4; i++) {
+      this.P[i][i] = 0.001;  // High confidence in initial quaternion
     }
     
     this.lastUpdateTime = timestamp;
@@ -162,17 +202,9 @@ export class OrientationFilter {
     this.state[5] = omega.y;
     this.state[6] = omega.z;
     
-    // Quaternion derivative: dq/dt = 0.5 * q * ω
-    const omega_q = new Quaternion(0, omega.x, omega.y, omega.z);
-    const q_dot = q.multiply(omega_q);
-    
-    // Integrate quaternion (Euler integration)
-    const q_new = new Quaternion(
-      q.w + 0.5 * q_dot.w * dt,
-      q.x + 0.5 * q_dot.x * dt,
-      q.y + 0.5 * q_dot.y * dt,
-      q.z + 0.5 * q_dot.z * dt
-    ).normalize();
+    // Integrate quaternion using RK4 (4th order Runge-Kutta)
+    // This is much more accurate than Euler integration for low sample rates
+    const q_new = this.integrateQuaternionRK4(q, omega, dt);
     
     // Update state
     this.state[0] = q_new.w;
@@ -201,40 +233,78 @@ export class OrientationFilter {
   updateAccelerometer(accel: { x: number; y: number; z: number }): void {
     if (!this.initialized) return;
     
-    // Normalize accelerometer measurement
+    // Check measurement validity
     const a_norm = Math.sqrt(accel.x * accel.x + accel.y * accel.y + accel.z * accel.z);
     if (a_norm < 0.1) return; // Invalid measurement
     
-    const a_measured = {
-      x: accel.x / a_norm,
-      y: accel.y / a_norm,
-      z: accel.z / a_norm
+    // Motion detection: check if magnitude deviates from gravity (9.81 m/s²)
+    // If there's linear acceleration, reduce trust in accelerometer
+    const gravity_mag = 9.81;
+    const accel_deviation = Math.abs(a_norm - gravity_mag);
+    const motion_threshold = 2.0; // 2 m/s² deviation indicates motion
+    
+    // Adaptive noise: increase R_accel during motion
+    // Scale factor: 1.0 when static, up to 100× when moving fast
+    const motion_scale = 1.0 + Math.min(99.0, (accel_deviation / motion_threshold) ** 2);
+    
+    const R_accel_adaptive = [
+      [this.R_accel[0][0] * motion_scale, 0, 0],
+      [0, this.R_accel[1][1] * motion_scale, 0],
+      [0, 0, this.R_accel[2][2] * motion_scale]
+    ];
+    
+    // Debug logging
+    if (Math.random() < 0.01) {
+      console.log('ACCEL update:', {
+        a_norm: a_norm.toFixed(2),
+        deviation: accel_deviation.toFixed(2),
+        motion_scale: motion_scale.toFixed(2),
+        R_base: this.R_accel[0][0].toFixed(4),
+        R_adaptive: R_accel_adaptive[0][0].toFixed(4)
+      });
+    }
+    
+    // Normalize measured acceleration to unit vector
+    // Accelerometer measures reaction force (opposite of gravity)
+    const a_measured = { 
+      x: accel.x / a_norm, 
+      y: accel.y / a_norm, 
+      z: accel.z / a_norm 
     };
     
-    // Expected measurement: rotate gravity vector to body frame
+    // Expected measurement: rotate normalized gravity DOWN vector to body frame
+    // Then negate to match accelerometer (which measures UP)
     const q = new Quaternion(this.state[0], this.state[1], this.state[2], this.state[3]);
-    const a_expected = q.conjugate().rotateVector(this.g);
+    const g_norm = Math.sqrt(this.g.x**2 + this.g.y**2 + this.g.z**2);
+    const g_normalized = { x: this.g.x / g_norm, y: this.g.y / g_norm, z: this.g.z / g_norm };
+    const g_rotated = q.conjugate().rotateVector(g_normalized);
+    // Negate because accelerometer measures opposite of gravity
+    const a_expected = { x: -g_rotated.x, y: -g_rotated.y, z: -g_rotated.z };
     
-    // Normalize expected (should already be normalized, but ensure)
-    const a_exp_norm = Math.sqrt(a_expected.x * a_expected.x + a_expected.y * a_expected.y + a_expected.z * a_expected.z);
-    a_expected.x /= a_exp_norm;
-    a_expected.y /= a_exp_norm;
-    a_expected.z /= a_exp_norm;
-    
-    // Innovation: difference between measurement and prediction
+    // Innovation: difference between measurement and prediction (unitless)
     const y = [
       a_measured.x - a_expected.x,
       a_measured.y - a_expected.y,
       a_measured.z - a_expected.z
     ];
     
+    // Debug logging
+    if (Math.random() < 0.01) {
+      const innovation_norm = Math.sqrt(y[0]**2 + y[1]**2 + y[2]**2);
+      console.log('ACCEL innovation:', {
+        innovation: innovation_norm.toFixed(4),
+        measured: {x: a_measured.x.toFixed(3), y: a_measured.y.toFixed(3), z: a_measured.z.toFixed(3)},
+        expected: {x: a_expected.x.toFixed(3), y: a_expected.y.toFixed(3), z: a_expected.z.toFixed(3)}
+      });
+    }
+    
     // Measurement Jacobian H (3x10): ∂h/∂x
     const H = this.computeAccelMeasurementJacobian(q);
     
-    // Innovation covariance: S = H * P * H^T + R
+    // Innovation covariance: S = H * P * H^T + R_adaptive
     const HP = this.multiplyMatrices(H, this.P);
     const HP_HT = this.multiplyMatrices(HP, this.transposeMatrix(H));
-    const S = this.addMatrices(HP_HT, this.R_accel);
+    const S = this.addMatrices(HP_HT, R_accel_adaptive);
     
     // Kalman gain: K = P * H^T * S^(-1)
     const S_inv = this.invertMatrix3x3(S);
@@ -255,6 +325,12 @@ export class OrientationFilter {
     this.state[2] = q_updated.y;
     this.state[3] = q_updated.z;
     
+    // Clamp gyro bias to reasonable bounds (prevent divergence)
+    const maxBias = 0.5; // 0.5 rad/s = ~28.6 deg/s max bias
+    for (let i = 7; i < 10; i++) {
+      this.state[i] = Math.max(-maxBias, Math.min(maxBias, this.state[i]));
+    }
+    
     // Covariance update: P = (I - K * H) * P
     const I = this.createIdentityMatrix(10);
     const KH = this.multiplyMatrices(K, H);
@@ -268,32 +344,44 @@ export class OrientationFilter {
   updateMagnetometer(mag: { x: number; y: number; z: number }): void {
     if (!this.initialized) return;
     
-    // Normalize magnetometer measurement
+    // Check measurement validity
     const m_norm = Math.sqrt(mag.x * mag.x + mag.y * mag.y + mag.z * mag.z);
     if (m_norm < 0.001) return; // Invalid measurement
     
-    const m_measured = {
-      x: mag.x / m_norm,
-      y: mag.y / m_norm,
-      z: mag.z / m_norm
+    // Normalize measured magnetic field to unit vector
+    const m_measured = { 
+      x: mag.x / m_norm, 
+      y: mag.y / m_norm, 
+      z: mag.z / m_norm 
     };
     
-    // Expected measurement: rotate earth's magnetic field to body frame
+    // Expected measurement: rotate normalized earth field to body frame
     const q = new Quaternion(this.state[0], this.state[1], this.state[2], this.state[3]);
-    const m_expected = q.conjugate().rotateVector(this.mag_earth);
+    const mag_norm = Math.sqrt(this.mag_earth.x**2 + this.mag_earth.y**2 + this.mag_earth.z**2);
+    const mag_normalized = { 
+      x: this.mag_earth.x / mag_norm, 
+      y: this.mag_earth.y / mag_norm, 
+      z: this.mag_earth.z / mag_norm 
+    };
+    const m_expected = q.conjugate().rotateVector(mag_normalized);
     
-    // Normalize expected
-    const m_exp_norm = Math.sqrt(m_expected.x * m_expected.x + m_expected.y * m_expected.y + m_expected.z * m_expected.z);
-    m_expected.x /= m_exp_norm;
-    m_expected.y /= m_exp_norm;
-    m_expected.z /= m_exp_norm;
-    
-    // Innovation
+    // Innovation (gauss)
     const y = [
       m_measured.x - m_expected.x,
       m_measured.y - m_expected.y,
       m_measured.z - m_expected.z
     ];
+    
+    // Debug: log innovation and R_mag to verify noise parameter effect
+    const innovation_norm = Math.sqrt(y[0]**2 + y[1]**2 + y[2]**2);
+    if (Math.random() < 0.01) { // Log 1% of updates to avoid spam
+      console.log('MAG update:', {
+        innovation: innovation_norm.toFixed(4),
+        R_mag_diagonal: this.R_mag[0][0].toFixed(4),
+        measured: m_measured,
+        expected: m_expected
+      });
+    }
     
     // Measurement Jacobian H (3x10): ∂h/∂x
     const H = this.computeMagMeasurementJacobian(q);
@@ -321,6 +409,12 @@ export class OrientationFilter {
     this.state[1] = q_updated.x;
     this.state[2] = q_updated.y;
     this.state[3] = q_updated.z;
+    
+    // Clamp gyro bias to reasonable bounds (prevent divergence)
+    const maxBias = 0.5; // 0.5 rad/s = ~28.6 deg/s max bias
+    for (let i = 7; i < 10; i++) {
+      this.state[i] = Math.max(-maxBias, Math.min(maxBias, this.state[i]));
+    }
     
     // Covariance update: P = (I - K * H) * P
     const I = this.createIdentityMatrix(10);
@@ -358,19 +452,83 @@ export class OrientationFilter {
   }
 
   /**
-   * Set earth's magnetic field vector (normalized, in inertial frame)
+   * Set earth's magnetic field vector (unnormalized, in inertial frame, gauss)
    */
   setMagneticField(mag: { x: number; y: number; z: number }): void {
-    const norm = Math.sqrt(mag.x * mag.x + mag.y * mag.y + mag.z * mag.z);
-    this.mag_earth = {
-      x: mag.x / norm,
-      y: mag.y / norm,
-      z: mag.z / norm
-    };
+    this.mag_earth = { x: mag.x, y: mag.y, z: mag.z };
   }
 
   isInitialized(): boolean {
     return this.initialized;
+  }
+
+  /**
+   * Integrate quaternion using 4th-order Runge-Kutta method
+   * More accurate than Euler integration, especially at low sample rates
+   * 
+   * @param q Current quaternion
+   * @param omega Angular velocity (rad/s)
+   * @param dt Time step (seconds)
+   * @returns Integrated quaternion (normalized)
+   */
+  private integrateQuaternionRK4(
+    q: Quaternion, 
+    omega: { x: number; y: number; z: number }, 
+    dt: number
+  ): Quaternion {
+    // Helper function to compute quaternion derivative: dq/dt = 0.5 * q * ω
+    const quaternionDerivative = (q_in: Quaternion, w: { x: number; y: number; z: number }) => {
+      const omega_q = new Quaternion(0, w.x, w.y, w.z);
+      const q_dot = q_in.multiply(omega_q);
+      return new Quaternion(
+        0.5 * q_dot.w,
+        0.5 * q_dot.x,
+        0.5 * q_dot.y,
+        0.5 * q_dot.z
+      );
+    };
+
+    // RK4 integration: k1, k2, k3, k4 are the derivatives at different points
+    // k1 = f(t, q)
+    const k1 = quaternionDerivative(q, omega);
+
+    // k2 = f(t + dt/2, q + dt/2 * k1)
+    const q2 = new Quaternion(
+      q.w + 0.5 * dt * k1.w,
+      q.x + 0.5 * dt * k1.x,
+      q.y + 0.5 * dt * k1.y,
+      q.z + 0.5 * dt * k1.z
+    );
+    const k2 = quaternionDerivative(q2, omega);
+
+    // k3 = f(t + dt/2, q + dt/2 * k2)
+    const q3 = new Quaternion(
+      q.w + 0.5 * dt * k2.w,
+      q.x + 0.5 * dt * k2.x,
+      q.y + 0.5 * dt * k2.y,
+      q.z + 0.5 * dt * k2.z
+    );
+    const k3 = quaternionDerivative(q3, omega);
+
+    // k4 = f(t + dt, q + dt * k3)
+    const q4 = new Quaternion(
+      q.w + dt * k3.w,
+      q.x + dt * k3.x,
+      q.y + dt * k3.y,
+      q.z + dt * k3.z
+    );
+    const k4 = quaternionDerivative(q4, omega);
+
+    // Combine: q_new = q + dt/6 * (k1 + 2*k2 + 2*k3 + k4)
+    const q_new = new Quaternion(
+      q.w + (dt / 6.0) * (k1.w + 2 * k2.w + 2 * k3.w + k4.w),
+      q.x + (dt / 6.0) * (k1.x + 2 * k2.x + 2 * k3.x + k4.x),
+      q.y + (dt / 6.0) * (k1.y + 2 * k2.y + 2 * k3.y + k4.y),
+      q.z + (dt / 6.0) * (k1.z + 2 * k2.z + 2 * k3.z + k4.z)
+    );
+
+    // Normalize to maintain unit quaternion constraint
+    return q_new.normalize();
   }
 
   /**
@@ -419,31 +577,34 @@ export class OrientationFilter {
 
   /**
    * Compute accelerometer measurement Jacobian H (3x10)
-   * ∂(R^T * g)/∂x where R is rotation from q
+   * ∂(-R^T * g)/∂x where R is rotation from q
+   * Note: Accelerometer measures -g (reaction force), so we negate the Jacobian
    */
   private computeAccelMeasurementJacobian(q: Quaternion): number[][] {
     const H = this.createZeroMatrix(3, 10);
     
     const q0 = q.w, q1 = q.x, q2 = q.y, q3 = q.z;
-    const gx = this.g.x, gy = this.g.y, gz = this.g.z;
+    // Use normalized gravity for Jacobian
+    const g_norm = Math.sqrt(this.g.x**2 + this.g.y**2 + this.g.z**2);
+    const gx = this.g.x / g_norm, gy = this.g.y / g_norm, gz = this.g.z / g_norm;
     
     // Jacobian of rotation with respect to quaternion
-    // h = R^T(q) * g, where R^T is the conjugate rotation
+    // h = -R^T(q) * g (negated because accelerometer measures opposite of gravity)
     
-    H[0][0] = 2 * (q0*gx - q3*gy + q2*gz);
-    H[0][1] = 2 * (q1*gx + q2*gy + q3*gz);
-    H[0][2] = 2 * (-q2*gx + q1*gy - q0*gz);
-    H[0][3] = 2 * (-q3*gx + q0*gy + q1*gz);
+    H[0][0] = -2 * (q0*gx - q3*gy + q2*gz);
+    H[0][1] = -2 * (q1*gx + q2*gy + q3*gz);
+    H[0][2] = -2 * (-q2*gx + q1*gy - q0*gz);
+    H[0][3] = -2 * (-q3*gx + q0*gy + q1*gz);
     
-    H[1][0] = 2 * (q3*gx + q0*gy - q1*gz);
-    H[1][1] = 2 * (q2*gx - q1*gy - q0*gz);
-    H[1][2] = 2 * (q1*gx + q2*gy + q3*gz);
-    H[1][3] = 2 * (q0*gx - q3*gy + q2*gz);
+    H[1][0] = -2 * (q3*gx + q0*gy - q1*gz);
+    H[1][1] = -2 * (q2*gx - q1*gy - q0*gz);
+    H[1][2] = -2 * (q1*gx + q2*gy + q3*gz);
+    H[1][3] = -2 * (q0*gx - q3*gy + q2*gz);
     
-    H[2][0] = 2 * (-q2*gx + q1*gy - q0*gz);
-    H[2][1] = 2 * (q3*gx + q0*gy - q1*gz);
-    H[2][2] = 2 * (-q0*gx + q3*gy - q2*gz);
-    H[2][3] = 2 * (q1*gx + q2*gy + q3*gz);
+    H[2][0] = -2 * (-q2*gx + q1*gy - q0*gz);
+    H[2][1] = -2 * (q3*gx + q0*gy - q1*gz);
+    H[2][2] = -2 * (-q0*gx + q3*gy - q2*gz);
+    H[2][3] = -2 * (q1*gx + q2*gy + q3*gz);
     
     // No dependence on angular velocity or bias
     return H;
@@ -456,7 +617,9 @@ export class OrientationFilter {
     const H = this.createZeroMatrix(3, 10);
     
     const q0 = q.w, q1 = q.x, q2 = q.y, q3 = q.z;
-    const mx = this.mag_earth.x, my = this.mag_earth.y, mz = this.mag_earth.z;
+    // Use normalized magnetic field for Jacobian
+    const mag_norm = Math.sqrt(this.mag_earth.x**2 + this.mag_earth.y**2 + this.mag_earth.z**2);
+    const mx = this.mag_earth.x / mag_norm, my = this.mag_earth.y / mag_norm, mz = this.mag_earth.z / mag_norm;
     
     // Similar to accelerometer Jacobian but with magnetic field
     H[0][0] = 2 * (q0*mx - q3*my + q2*mz);

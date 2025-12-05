@@ -259,6 +259,7 @@
           <option value="temperature">Temperature</option>
           <option value="tempphysics">TempPhysics</option>
           <option value="orientation">Orientation</option>
+          <option value="offset">Offset Visualizer</option>
         </select>
         <label for="temp-source" id="temp-source-label">Temp Source:</label>
         <select id="temp-source">
@@ -304,6 +305,24 @@
             <span id="speed-value" style="font-size: 13px; min-width: 40px;">1.0x</span>
           </div>
           <span id="time-display" style="font-size: 13px; font-family: monospace; min-width: 120px; text-align: right;">0.0s / 0.0s</span>
+        </div>
+      </div>
+      
+      <!-- Offset Visualizer display area (hidden by default) -->
+      <div id="offset-display" style="display: none; flex: 1; flex-direction: column; gap: 0; position: absolute; top: 0; left: 0; right: 0; bottom: 0;">
+        <!-- Top row: Year chart (full width) -->
+        <div style="flex: 1; display: flex; min-height: 0;">
+          <canvas id="offset-year-canvas" style="width: 100%; height: 100%;"></canvas>
+        </div>
+        
+        <!-- Bottom row: Month and Day charts (split) -->
+        <div style="flex: 1; display: flex; flex-direction: row; gap: 0; min-height: 0;">
+          <div style="flex: 1; position: relative;">
+            <canvas id="offset-month-canvas" style="width: 100%; height: 100%;"></canvas>
+          </div>
+          <div style="flex: 1; position: relative;">
+            <canvas id="offset-day-canvas" style="width: 100%; height: 100%;"></canvas>
+          </div>
         </div>
       </div>
       
@@ -440,6 +459,93 @@
 
         <button id="apply-params-btn">Apply & Reprocess</button>
         <button id="reset-params-btn" style="background: #3e3e42;">Reset to Defaults</button>
+        
+        <!-- Temperature Estimator Section -->
+        <div style="border-top: 1px solid #3e3e42; margin-top: 12px; padding-top: 12px;">
+          <h3 style="margin-bottom: 8px;">Temperature Estimator</h3>
+          
+          <!-- GPS Info Display -->
+          <div id="gps-info" style="background: #252526; padding: 8px; border-radius: 4px; margin-bottom: 10px; font-family: monospace; font-size: 10px;">
+            <div style="color: #858585; margin-bottom: 4px;">GPS Location & Time:</div>
+            <div id="gps-location" style="color: #4dabf7;">No GPS data loaded</div>
+            <div id="gps-datetime-utc" style="color: #858585; margin-top: 2px;">UTC: --</div>
+            <div id="gps-datetime-local" style="color: #858585;">Local: --</div>
+            <div style="border-top: 1px solid #3e3e42; margin: 6px 0; padding-top: 6px;">
+              <div style="color: #858585; margin-bottom: 2px;">Estimated Offset:</div>
+              <div id="estimated-offset" style="color: #22c55e; font-size: 12px; font-weight: 500;">-- K (-- °F)</div>
+              <div id="estimated-sealevel" style="color: #858585; font-size: 10px; margin-top: 2px;">Sea Level Temp: --</div>
+              <div id="solar-info" style="color: #858585; font-size: 10px;">Solar Hour: -- | Lag: -- hrs</div>
+            </div>
+          </div>
+          
+          <button id="apply-estimated-offset-btn" style="width: 100%; margin-bottom: 8px; background: #22c55e;">Apply Estimated Offset</button>
+          
+          <div class="param-group">
+            <label>
+              T_EQUATOR - Equator Temp (°C)
+              <span class="param-value" id="est-tEquator-value">32.0</span>
+            </label>
+            <input type="range" id="est-tEquator" min="20" max="45" step="0.5" value="32.0">
+          </div>
+          
+          <div class="param-group">
+            <label>
+              A_LAT - Latitude Amplitude (°C)
+              <span class="param-value" id="est-aLat-value">23.0</span>
+            </label>
+            <input type="range" id="est-aLat" min="10" max="40" step="0.5" value="23.0">
+          </div>
+          
+          <div class="param-group">
+            <label>
+              A_YEAR - Seasonal Amplitude (K)
+              <span class="param-value" id="est-aYear-value">16.0</span>
+            </label>
+            <input type="range" id="est-aYear" min="0" max="40" step="0.5" value="16.0">
+          </div>
+          
+          <div class="param-group">
+            <label>
+              A_DAY - Daily Amplitude (K)
+              <span class="param-value" id="est-aDay-value">10.0</span>
+            </label>
+            <input type="range" id="est-aDay" min="0" max="30" step="0.5" value="10.0">
+          </div>
+          
+          <div class="param-group">
+            <label>
+              H0 - Base Lag (hours)
+              <span class="param-value" id="est-h0-value">3.0</span>
+            </label>
+            <input type="range" id="est-h0" min="0" max="6" step="0.1" value="3.0">
+          </div>
+          
+          <div class="param-group">
+            <label>
+              ALPHA - Latitude Lag Effect (hours)
+              <span class="param-value" id="est-alpha-value">1.2</span>
+            </label>
+            <input type="range" id="est-alpha" min="0" max="3" step="0.1" value="1.2">
+          </div>
+          
+          <div class="param-group">
+            <label>
+              BETA - Seasonal Lag Effect (hours)
+              <span class="param-value" id="est-beta-value">1.0</span>
+            </label>
+            <input type="range" id="est-beta" min="0" max="3" step="0.1" value="1.0">
+          </div>
+          
+          <div class="param-group">
+            <label>
+              LAPSE_RATE (°C/km)
+              <span class="param-value" id="est-lapseRate-value">6.5</span>
+            </label>
+            <input type="range" id="est-lapseRate" min="4" max="10" step="0.1" value="6.5">
+          </div>
+          
+          <button id="reset-estimator-params-btn" style="width: 100%; background: #3e3e42;">Reset Estimator Defaults</button>
+        </div>
       </div>
       
       <!-- Physics Filter Controls -->
@@ -504,6 +610,194 @@
 
         <button id="apply-physics-params-btn">Apply & Reprocess</button>
         <button id="reset-physics-params-btn" style="background: #3e3e42;">Reset to Defaults</button>
+      </div>
+      
+      <!-- Orientation Filter Controls -->
+      <div class="filter-controls" id="orientation-filter-controls" style="display: none;">
+        <h3>Orientation Filter Parameters</h3>
+        
+        <div class="param-group">
+          <label>
+            Gyro Noise Variance ((rad/s)²)
+            <span class="param-value" id="orientation-gyroNoiseVar-value">0.005</span>
+          </label>
+          <input type="range" id="orientation-gyroNoiseVar" min="-4" max="1" step="0.01" value="-2.301">
+        </div>
+
+        <div class="param-group">
+          <label>
+            Gyro Bias Noise Variance ((rad/s)²)
+            <span class="param-value" id="orientation-gyroBiasNoiseVar-value">0.0001</span>
+          </label>
+          <input type="range" id="orientation-gyroBiasNoiseVar" min="-4" max="1" step="0.01" value="-4">
+        </div>
+
+        <div class="param-group">
+          <label>
+            Accel Noise Variance ((m/s²)²)
+            <span class="param-value" id="orientation-accelNoiseVar-value">1.0</span>
+          </label>
+          <input type="range" id="orientation-accelNoiseVar" min="-4" max="1" step="0.01" value="0">
+        </div>
+
+        <div class="param-group">
+          <label>
+            Mag Noise Variance (unit²)
+            <span class="param-value" id="orientation-magNoiseVar-value">1.0</span>
+          </label>
+          <input type="range" id="orientation-magNoiseVar" min="-4" max="1" step="0.01" value="0">
+        </div>
+
+        <button id="apply-orientation-params-btn">Apply & Reprocess</button>
+        <button id="reset-orientation-params-btn" style="background: #3e3e42;">Reset to Defaults</button>
+      </div>
+      
+      <!-- Offset Visualizer Controls -->
+      <div class="filter-controls" id="offset-filter-controls" style="display: none;">
+        <h3>Offset Visualizer Parameters</h3>
+        
+        <!-- Location info display -->
+        <div style="background: #252526; padding: 8px; border-radius: 4px; margin-bottom: 10px; font-family: monospace; font-size: 10px;">
+          <div style="color: #858585; margin-bottom: 4px;">Current Settings:</div>
+          <div id="offset-location-info" style="color: #4dabf7;">Lat: 41.22° Lon: -111.97°</div>
+          <div id="offset-date-info" style="color: #858585; margin-top: 2px;">Date: Sep 16, 2024</div>
+          <div id="offset-calc-info" style="color: #22c55e; margin-top: 4px; font-size: 11px;">Offset: -- K</div>
+        </div>
+        
+        <div style="border-bottom: 1px solid #3e3e42; margin-bottom: 10px; padding-bottom: 8px;">
+          <div style="color: #cccccc; font-size: 11px; margin-bottom: 6px; font-weight: 500;">📍 Location</div>
+          
+          <div class="param-group">
+            <label>
+              Latitude (°)
+              <span class="param-value" id="offset-lat-value">41.22</span>
+            </label>
+            <input type="range" id="offset-lat" min="-90" max="90" step="0.01" value="41.22">
+          </div>
+          
+          <div class="param-group">
+            <label>
+              Longitude (°)
+              <span class="param-value" id="offset-lon-value">-111.97</span>
+            </label>
+            <input type="range" id="offset-lon" min="-180" max="180" step="0.01" value="-111.97">
+          </div>
+          
+          <div class="param-group">
+            <label>
+              Altitude (m)
+              <span class="param-value" id="offset-alt-value">1350</span>
+            </label>
+            <input type="range" id="offset-alt" min="0" max="5000" step="10" value="1350">
+          </div>
+        </div>
+        
+        <div style="border-bottom: 1px solid #3e3e42; margin-bottom: 10px; padding-bottom: 8px;">
+          <div style="color: #cccccc; font-size: 11px; margin-bottom: 6px; font-weight: 500;">📅 Date Selection</div>
+          
+          <div class="param-group">
+            <label>
+              Day of Week (1=Mon - 7=Sun)
+              <span class="param-value" id="offset-dow-value">1</span>
+            </label>
+            <input type="range" id="offset-dow" min="1" max="7" step="1" value="1">
+          </div>
+          
+          <div class="param-group">
+            <label>
+              Week of Year (1-52)
+              <span class="param-value" id="offset-week-value">38</span>
+            </label>
+            <input type="range" id="offset-week" min="1" max="52" step="1" value="38">
+          </div>
+          
+          <div class="param-group">
+            <label>
+              Month (1-12)
+              <span class="param-value" id="offset-month-value">9</span>
+            </label>
+            <input type="range" id="offset-month" min="1" max="12" step="1" value="9">
+          </div>
+          
+          <div class="param-group">
+            <label>
+              Day of Month (1-31)
+              <span class="param-value" id="offset-day-value">16</span>
+            </label>
+            <input type="range" id="offset-day" min="1" max="31" step="1" value="16">
+          </div>
+        </div>
+        
+        <div style="border-bottom: 1px solid #3e3e42; margin-bottom: 10px; padding-bottom: 8px;">
+          <div style="color: #cccccc; font-size: 11px; margin-bottom: 6px; font-weight: 500;">🌡️ Model Parameters</div>
+          
+          <div class="param-group">
+            <label>
+              T_EQUATOR - Equator Temp (°C)
+              <span class="param-value" id="offset-tEquator-value">32.0</span>
+            </label>
+            <input type="range" id="offset-tEquator" min="20" max="45" step="0.5" value="32.0">
+          </div>
+          
+          <div class="param-group">
+            <label>
+              A_LAT - Latitude Amplitude (°C)
+              <span class="param-value" id="offset-aLat-value">23.0</span>
+            </label>
+            <input type="range" id="offset-aLat" min="10" max="40" step="0.5" value="23.0">
+          </div>
+          
+          <div class="param-group">
+            <label>
+              A_YEAR - Seasonal Amplitude (K)
+              <span class="param-value" id="offset-aYear-value">16.0</span>
+            </label>
+            <input type="range" id="offset-aYear" min="0" max="40" step="0.5" value="16.0">
+          </div>
+          
+          <div class="param-group">
+            <label>
+              A_DAY - Daily Amplitude (K)
+              <span class="param-value" id="offset-aDay-value">10.0</span>
+            </label>
+            <input type="range" id="offset-aDay" min="0" max="30" step="0.5" value="10.0">
+          </div>
+          
+          <div class="param-group">
+            <label>
+              H0 - Base Lag (hours)
+              <span class="param-value" id="offset-h0-value">3.0</span>
+            </label>
+            <input type="range" id="offset-h0" min="0" max="6" step="0.1" value="3.0">
+          </div>
+          
+          <div class="param-group">
+            <label>
+              ALPHA - Latitude Lag Effect (hours)
+              <span class="param-value" id="offset-alpha-value">1.2</span>
+            </label>
+            <input type="range" id="offset-alpha" min="0" max="3" step="0.1" value="1.2">
+          </div>
+          
+          <div class="param-group">
+            <label>
+              BETA - Seasonal Lag Effect (hours)
+              <span class="param-value" id="offset-beta-value">1.0</span>
+            </label>
+            <input type="range" id="offset-beta" min="0" max="3" step="0.1" value="1.0">
+          </div>
+          
+          <div class="param-group">
+            <label>
+              LAPSE_RATE (°C/km)
+              <span class="param-value" id="offset-lapseRate-value">6.5</span>
+            </label>
+            <input type="range" id="offset-lapseRate" min="4" max="10" step="0.1" value="6.5">
+          </div>
+        </div>
+        
+        <button id="offset-use-gps-btn" style="width: 100%; margin-bottom: 6px; background: #4dabf7;">Use GPS Data Location</button>
+        <button id="offset-reset-btn" style="width: 100%; background: #3e3e42;">Reset to Defaults</button>
       </div>
       
       <div class="status" id="status">

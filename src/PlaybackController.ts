@@ -12,6 +12,7 @@ export class PlaybackController {
   private lastTimestamp: number = 0;
   private playbackSpeed: number = 1.0;
   private accumulatedTime: number = 0;
+  private plotter: any = null;  // Reference to the orientation plotter
   
   constructor(
     private renderer3D: Renderer3D,
@@ -23,6 +24,10 @@ export class PlaybackController {
     private timeDisplay: HTMLSpanElement
   ) {
     this.setupControls();
+  }
+  
+  setPlotter(plotter: any) {
+    this.plotter = plotter;
   }
   
   private setupControls(): void {
@@ -69,6 +74,11 @@ export class PlaybackController {
     this.accumulatedTime = 0;
     this.animate();
     this.updateUI();
+    
+    // Show cursor when playing
+    if (this.plotter && this.data.length > 0) {
+      this.plotter.setCursor(this.data[this.currentIndex].time);
+    }
   }
   
   pause(): void {
@@ -94,6 +104,11 @@ export class PlaybackController {
     }
     this.updateTimeDisplay();
     this.updateUI();
+    
+    // Hide cursor when stopped
+    if (this.plotter) {
+      this.plotter.clearCursor();
+    }
   }
   
   private animate = (): void => {
@@ -123,6 +138,11 @@ export class PlaybackController {
           point.pitch || 0,
           point.yaw || 0
         );
+        
+        // Update cursor position
+        if (this.plotter) {
+          this.plotter.setCursor(point.time);
+        }
         
         this.updateTimeDisplay();
       } else {
